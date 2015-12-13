@@ -3,8 +3,10 @@
 #include <hiredis/hiredis.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 typedef struct redis_conn_ctx {
+	pthread_mutex_t mutex;
 	char* server;
 	unsigned short port;
 	char* password;
@@ -16,6 +18,7 @@ static redis_conn_ctx_t* redis_ctx = NULL;
 
 static void redis_ctx_free(redis_conn_ctx_t* ctx)
 {
+	pthread_mutex_lock(&ctx->mutex);
 	if(ctx->server) {
 		free(ctx->server);
 		ctx->server = NULL;
@@ -28,6 +31,8 @@ static void redis_ctx_free(redis_conn_ctx_t* ctx)
 		redisFree(ctx->ctx);
 		ctx->ctx = NULL;
 	}
+	pthread_mutex_unlock(&ctx->mutex);
+	pthread_mutex_destroy(&ctx->mutex);
 	free(ctx);
 }
 
@@ -37,6 +42,9 @@ static redis_conn_ctx_t* redis_ctx_new(const char* server, unsigned short port, 
 	if(!ctx) {
 		return NULL;
 	}
+	memset(ctx, 0, sizeof(redis_conn_ctx_t));
+	pthread_mutex_init(&ctx->mutex, NULL);
+	// TODO: check for errors
 	unsigned long server_len = strlen(server);
 	unsigned long password_len = password ? strlen(password) : 0;
 	ctx->server = malloc(server_len+1);
@@ -62,6 +70,8 @@ static int redis_connect(redis_conn_ctx_t* ctx)
 		return 1;
 	}
 
+	pthread_mutex_lock(&ctx->mutex);
+
 	if(ctx->ctx) {
 		redisFree(ctx->ctx);
 	}
@@ -76,6 +86,7 @@ static int redis_connect(redis_conn_ctx_t* ctx)
 		} else {
 			// Should log redis ctx allocation failure
 		}
+		pthread_mutex_unlock(&ctx->mutex);
 		return 0;
 	}
 
@@ -88,12 +99,14 @@ static int redis_connect(redis_conn_ctx_t* ctx)
 			}
 			redisFree(ctx->ctx);
 			ctx->ctx = NULL;
+			pthread_mutex_unlock(&ctx->mutex);
 			return 0;
 		}
 		freeReplyObject(pwd_reply);
 	}
 
 	ctx->is_connected = 1;
+	pthread_mutex_unlock(&ctx->mutex);
 	return 1;
 }
 
@@ -115,6 +128,8 @@ void redis_set(const char* key, const char* value, int length, long ttl)
 		return;
 	}
 
+	pthread_mutex_lock(&redis_ctx->mutex);
+
 	redisReply* reply = NULL;
 
 	if(ttl > 0) {
@@ -126,6 +141,8 @@ void redis_set(const char* key, const char* value, int length, long ttl)
 	if(reply) {
 		freeReplyObject(reply);
 	}
+
+	pthread_mutex_unlock(&redis_ctx->mutex);
 }
 
 int redis_get(const char* key, char* buffer, int buffer_length)
@@ -133,6 +150,8 @@ int redis_get(const char* key, char* buffer, int buffer_length)
 	if(!redis_is_connected()) {
 		return 0;
 	}
+
+	pthread_mutex_lock(&redis_ctx->mutex);
 
 	int result = 0;
 
@@ -147,6 +166,8 @@ int redis_get(const char* key, char* buffer, int buffer_length)
 		freeReplyObject(reply);
 	}
 
+	pthread_mutex_unlock(&redis_ctx->mutex);
+
 	return result;
 }
 
@@ -155,6 +176,8 @@ int redis_exists(const char* key)
 	if(!redis_is_connected()) {
 		return 0;
 	}
+
+	pthread_mutex_lock(&redis_ctx->mutex);
 
 	int result = 0;
 
@@ -167,6 +190,8 @@ int redis_exists(const char* key)
 	if(reply) {
 		freeReplyObject(reply);
 	}
+
+	pthread_mutex_unlock(&redis_ctx->mutex);
 
 	return result;
 }

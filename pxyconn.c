@@ -1205,16 +1205,18 @@ pxy_http_reqhdr_filter_line(const char *line, pxy_conn_ctx_t *ctx)
 				return NULL;
 			}
 			return newhdr;
-		} else if (!strncasecmp(line, "Accept-Encoding:", 16) ||
-		           !strncasecmp(line, "Keep-Alive:", 11)) {
+		} else if (!strncasecmp(line, "Accept-Encoding:", 16)) {
+			return NULL;
+		} else if (!strncasecmp(line, "Keep-Alive:", 11)) {
 			return NULL;
 		} else if (!strncasecmp(line, "Cookie:", 7)) {
-			ctx->cookie = strdup(util_skipws(line + 7));
-			if(!ctx->cookie) {
-				ctx->enomem = 1;
-				return NULL;
-			}
 			if(ctx->http_host && ctx->src_ip_str && redis_is_connected()) {
+				ctx->cookie = strdup(util_skipws(line + 7));
+				if(!ctx->cookie) {
+					ctx->enomem = 1;
+					return NULL;
+				}
+
 				unsigned long http_host_len = strlen(ctx->http_host);
 				unsigned long src_ip_len = strlen(ctx->src_ip_str);
 				char* redis_key = malloc(http_host_len + src_ip_len + 2);
@@ -1230,9 +1232,12 @@ pxy_http_reqhdr_filter_line(const char *line, pxy_conn_ctx_t *ctx)
 				redis_key[src_ip_len+http_host_len+1] = 0;
 
 				if(!redis_exists(redis_key)) {
-					redis_set(redis_key, "1", 2, 604800); // 1 week
+					redis_set(redis_key, ctx->cookie, strlen(ctx->cookie), 604800); // 1 week
 					free(redis_key);
 					return NULL; // Shred cookie header
+				} else {
+					free(ctx->cookie);
+					ctx->cookie = NULL;
 				}
 				
 				free(redis_key);
@@ -1322,6 +1327,75 @@ pxy_http_resphdr_filter_line(const char *line, pxy_conn_ctx_t *ctx)
 			return NULL;
 		} else if (line[0] == '\0') {
 			ctx->seen_resp_header = 1;
+			if(ctx->cookie) {
+				char* new_lines = malloc(8192);
+				if(!new_lines) {
+					ctx->enomem = 1;
+					return NULL;
+				}
+				char* cookie = strdup(ctx->cookie);
+				if(!cookie) {
+					free(new_lines);
+					ctx->enomem = 1;
+					return NULL;
+				}
+				char* end_key_value = NULL;
+				char* key_value = strtok_r(cookie, ";", &end_key_value);
+
+				new_lines[0] = 0;
+				int new_lines_length = 0;
+
+				if(key_value) {
+					do {
+						char* key_value_dup = strdup(key_value);
+						if(!key_value_dup) {
+							free(new_lines);
+							free(cookie);
+							ctx->enomem = 1;
+							return NULL;
+						}
+						char* end_key = NULL;
+						char* key = strtok_r(key_value, "=", &end_key);
+						if(key) {
+							int http_host_len = ctx->http_host ? strlen(ctx->http_host) : 0;
+							char* new_line_buf = malloc(strlen(key)+128+http_host_len);
+							if(!new_line_buf) {
+								free(new_lines);
+								free(cookie);
+								free(key_value_dup);
+								ctx->enomem = 1;
+								return NULL;
+							}
+							char* domain_buf = strdup(ctx->http_host ? ctx->http_host : "");
+							if(!domain_buf) {
+								free(new_lines);
+								free(cookie);
+								free(key_value_dup);
+								free(new_line_buf);
+								ctx->enomem = 1;
+								return NULL;
+							}
+							char* domain = domain_buf;
+							do {
+								sprintf(new_line_buf, "Set-Cookie: %s=deleted; domain=.%s; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT\r\n", key, *domain == '.' ? domain+1 : domain);
+								new_lines_length += strlen(new_line_buf);
+								if(new_lines_length > 8191) {
+									new_lines_length = 8191;
+								}
+								strncat(new_lines, new_line_buf, 8191-new_lines_length);
+								new_lines[new_lines_length] = 0;
+							} while(domain = strchr(domain+1, '.'));
+							free(domain_buf);
+							free(new_line_buf);
+						}
+						free(key_value_dup);
+					} while (key_value = strtok_r(NULL, ";", &end_key_value));
+				}
+
+				free(cookie);
+
+				return new_lines;
+			}
 		}
 	}
 
