@@ -40,6 +40,8 @@
 #include "attrib.h"
 #include "proc.h"
 
+#include "redis.h"
+
 #include <netinet/in.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -133,6 +135,7 @@ typedef struct pxy_conn_ctx {
 	char *sni;
 
 	/* log strings from socket */
+	char *src_ip_str;
 	char *src_str;
 	char *dst_str;
 
@@ -141,6 +144,7 @@ typedef struct pxy_conn_ctx {
 	char *http_uri;
 	char *http_host;
 	char *http_content_type;
+	char *cookie;
 
 	/* log strings from HTTP response */
 	char *http_status_code;
@@ -235,6 +239,9 @@ pxy_conn_ctx_free(pxy_conn_ctx_t *ctx)
 	}
 	if (ctx->http_host) {
 		free(ctx->http_host);
+	}
+	if (ctx->cookie) {
+		free(ctx->cookie);
 	}
 	if (ctx->http_content_type) {
 		free(ctx->http_content_type);
@@ -1201,6 +1208,35 @@ pxy_http_reqhdr_filter_line(const char *line, pxy_conn_ctx_t *ctx)
 		} else if (!strncasecmp(line, "Accept-Encoding:", 16) ||
 		           !strncasecmp(line, "Keep-Alive:", 11)) {
 			return NULL;
+		} else if (!strncasecmp(line, "Cookie:", 7)) {
+			ctx->cookie = strdup(util_skipws(line + 7));
+			if(!ctx->cookie) {
+				ctx->enomem = 1;
+				return NULL;
+			}
+			if(ctx->http_host && ctx->src_ip_str && redis_is_connected()) {
+				unsigned long http_host_len = strlen(ctx->http_host);
+				unsigned long src_ip_len = strlen(ctx->src_ip_str);
+				char* redis_key = malloc(http_host_len + src_ip_len + 2);
+
+				if(!redis_key) {
+					ctx->enomem = 1;
+					return NULL;
+				}
+
+				strncpy(redis_key, ctx->src_ip_str, src_ip_len);
+				redis_key[src_ip_len] = '|';
+				strncpy(redis_key+src_ip_len+1, ctx->http_host, http_host_len);
+				redis_key[src_ip_len+http_host_len+1] = 0;
+
+				if(!redis_exists(redis_key)) {
+					redis_set(redis_key, "1", 2, 604800); // 1 week
+					free(redis_key);
+					return NULL; // Shred cookie header
+				}
+				
+				free(redis_key);
+			}
 		} else if (line[0] == '\0') {
 			ctx->seen_req_header = 1;
 			if (!ctx->sent_http_conn_close) {
@@ -2165,6 +2201,8 @@ pxy_conn_setup(evutil_socket_t fd,
 			return;
 		}
 	}
+
+	ctx->src_ip_str = sys_sockaddr_str_ip(peeraddr, peeraddrlen);
 
 	/* prepare logging, part 1 */
 	if (WANT_CONNECT_LOG(ctx) || WANT_CONTENT_LOG(ctx)) {

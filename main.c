@@ -140,6 +140,8 @@ main_usage(void)
 "  -s ciphers  use the given OpenSSL cipher suite spec (default: ALL:-aNULL)\n"
 "  -e engine   specify default NAT engine to use (default: %s)\n"
 "  -E          list available NAT engines and exit\n"
+"  -H address  connect to this Redis host and port (default: no cookie stripping)\n"
+"  -a auth     use specified Redis auth (default: empty = no auth)\n"
 "  -u user     drop privileges to user (default if run as root: nobody)\n"
 "  -m group    when using -u, override group (default: primary group of user)\n"
 "  -j jaildir  chroot() to jaildir (impacts -S/-F and sni, see manual page)\n"
@@ -275,7 +277,7 @@ main(int argc, char *argv[])
 	}
 
 	while ((ch = getopt(argc, argv, OPT_g OPT_G OPT_Z OPT_i
-	                    "k:c:C:K:t:OPs:r:R:e:Eu:m:j:p:l:L:S:F:dDVh")) != -1) {
+	                    "H:a:k:c:C:K:t:OPs:r:R:e:Eu:m:j:p:l:L:S:F:dDVh")) != -1) {
 		switch (ch) {
 			case 'c':
 				if (opts->cacrt)
@@ -501,6 +503,18 @@ main(int argc, char *argv[])
 				opts->contentlog_isdir = 0;
 				opts->contentlog_isspec = 0;
 				break;
+			case 'H':
+				if(opts->redis_host_port) {
+					free(opts->redis_host_port);
+				}
+				opts->redis_host_port = strdup(optarg);
+				break;
+			case 'a':
+				if(opts->redis_auth) {
+					free(opts->redis_auth);
+				}
+				opts->redis_auth = strdup(optarg);
+				break;
 			case 'S':
 				if (opts->contentlog)
 					free(opts->contentlog);
@@ -656,6 +670,11 @@ main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
+	if(opts->redis_auth && !opts->redis_host_port) {
+		fprintf(stderr, "%s: -a depends on -H.\n", argv0);
+		exit(EXIT_FAILURE);
+	}
+
 	/* debugging */
 	if (OPTS_DEBUG(opts)) {
 		main_version();
@@ -717,6 +736,19 @@ main(int argc, char *argv[])
 	if (nat_preinit() == -1) {
 		fprintf(stderr, "%s: failed to preinit NAT lookup.\n", argv0);
 		exit(EXIT_FAILURE);
+	}
+
+	if(opts->redis_host_port) {
+		unsigned short port = 6379;
+		const char delim[2] = ":";
+		const char* redis_host_str = strtok(opts->redis_host_port, delim);
+		const char* redis_port_str = strtok(NULL, delim);
+		if(redis_port_str) {
+			port = (unsigned short)atoi(redis_port_str);
+		}
+		if(!redis_setup(redis_host_str, port, opts->redis_auth)) {
+			fprintf(stderr, "%s: could not connect Redis. Continuing without cookie stripping.\n", argv0);
+		}
 	}
 
 	/* Bind listeners before dropping privileges */

@@ -365,6 +365,26 @@ sys_sockaddr_str(struct sockaddr *addr, socklen_t addrlen)
 }
 
 /*
+ * Converts an IPv4/IPv6 sockaddr into a printable string representation (Only IP).
+ * Returns an allocated buffer which must be freed by caller, or NULL on error.
+ */
+char *
+sys_sockaddr_str_ip(struct sockaddr *addr, socklen_t addrlen)
+{
+	char host[INET6_ADDRSTRLEN], serv[6];
+	int rv;
+
+	rv = getnameinfo(addr, addrlen, host, sizeof(host), serv, sizeof(serv),
+	                 NI_NUMERICHOST | NI_NUMERICSERV);
+	if (rv != 0) {
+		log_err_printf("Cannot get nameinfo for socket address: %s\n",
+		               gai_strerror(rv));
+		return NULL;
+	}
+	return strdup(host);
+}
+
+/*
  * Returns 1 if path points to an existing directory node in the filesystem.
  * Returns 0 if path is NULL, does not exist, or points to a file of some kind.
  */

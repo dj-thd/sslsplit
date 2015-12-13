@@ -88,6 +88,8 @@ typedef struct opts {
 	char *pidfile;
 	char *connectlog;
 	char *contentlog;
+	char *redis_host_port;
+	char *redis_auth;
 	CONST_SSL_METHOD *(*sslmethod)(void);
 	X509 *cacrt;
 	EVP_PKEY *cakey;

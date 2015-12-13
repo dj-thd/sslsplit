@@ -10,7 +10,6 @@
 # Define to make SSLsplit set a session id context in server mode.
 #FEATURES+=	-DUSE_SSL_SESSION_ID_CONTEXT
 
-
 ### Debugging
 
 # These flags are added to CFLAGS iff building from a git repo.
@@ -181,6 +180,9 @@ ifndef CHECK_BASE
 TPKGS+=		$(shell $(PKGCONFIG) --exists check && echo check)
 endif
 
+# Include hiredis
+#PKGS+=		$(shell $(PKGCONFIG) --exists hiredis && echo hiredis)
+
 # Autodetect dependencies not known to pkg-config
 ifeq (,$(filter openssl,$(PKGS)))
 OPENSSL_PAT:=	include/openssl/ssl.h
@@ -251,6 +253,9 @@ TPKG_CPPFLAGS+=	-I$(CHECK_FOUND)/include
 TPKG_LDFLAGS+=	-L$(CHECK_FOUND)/lib
 TPKG_LIBS+=	-lcheck
 endif
+
+# Include hiredis
+PKG_LIBS+=	-lhiredis
 
 ifneq (,$(strip $(PKGS)))
 PKG_CFLAGS+=	$(shell $(PKGCONFIG) --cflags-only-other $(PKGS))
