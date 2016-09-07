@@ -1,6 +1,6 @@
 /*
- * SSLsplit - transparent and scalable SSL/TLS interception
- * Copyright (c) 2009-2014, Daniel Roethlisberger <daniel@roe.ch>
+ * SSLsplit - transparent SSL/TLS interception
+ * Copyright (c) 2009-2016, Daniel Roethlisberger <daniel@roe.ch>
  * All rights reserved.
  * http://www.roe.ch/SSLsplit
  *
@@ -8,8 +8,7 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice unmodified, this list of conditions, and the following
- *    disclaimer.
+ *    notice, this list of conditions, and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
@@ -40,6 +39,8 @@
 typedef struct proxyspec {
 	unsigned int ssl : 1;
 	unsigned int http : 1;
+	unsigned int upgrade: 1;
+	unsigned int dns : 1;		/* set if spec needs DNS lookups */
 	struct sockaddr_storage listen_addr;
 	socklen_t listen_addrlen;
 	/* connect_addr and connect_addrlen are set: static mode;
@@ -58,21 +59,21 @@ typedef struct opts {
 	unsigned int debug : 1;
 	unsigned int detach : 1;
 	unsigned int sslcomp : 1;
-#if defined(SSL_OP_NO_SSLv2) && defined(WITH_SSLV2)
+#ifdef HAVE_SSLV2
 	unsigned int no_ssl2 : 1;
-#endif /* SSL_OP_NO_SSLv2 && WITH_SSLV2 */
-#ifdef SSL_OP_NO_SSLv3
+#endif /* HAVE_SSLV2 */
+#ifdef HAVE_SSLV3
 	unsigned int no_ssl3 : 1;
-#endif /* SSL_OP_NO_SSLv3 */
-#ifdef SSL_OP_NO_TLSv1
+#endif /* HAVE_SSLV3 */
+#ifdef HAVE_TLSV10
 	unsigned int no_tls10 : 1;
-#endif /* SSL_OP_NO_TLSv1 */
-#ifdef SSL_OP_NO_TLSv1_1
+#endif /* HAVE_TLSV10 */
+#ifdef HAVE_TLSV11
 	unsigned int no_tls11 : 1;
-#endif /* SSL_OP_NO_TLSv1_1 */
-#ifdef SSL_OP_NO_TLSv1_2
+#endif /* HAVE_TLSV11 */
+#ifdef HAVE_TLSV12
 	unsigned int no_tls12 : 1;
-#endif /* SSL_OP_NO_TLSv1_2 */
+#endif /* HAVE_TLSV12 */
 	unsigned int passthrough : 1;
 	unsigned int deny_ocsp : 1;
 	unsigned int contentlog_isdir : 1;
@@ -80,7 +81,9 @@ typedef struct opts {
 #ifdef HAVE_LOCAL_PROCINFO
 	unsigned int lprocinfo : 1;
 #endif /* HAVE_LOCAL_PROCINFO */
+	unsigned int certgen_writeall: 1;
 	char *ciphers;
+	char *certgendir;
 	char *tgcrtdir;
 	char *dropuser;
 	char *dropgroup;
@@ -90,6 +93,7 @@ typedef struct opts {
 	char *contentlog;
 	char *redis_host_port;
 	char *redis_auth;
+	char *contentlog_basedir; /* static part of logspec, for privsep srv */
 	CONST_SSL_METHOD *(*sslmethod)(void);
 	X509 *cacrt;
 	EVP_PKEY *cakey;
@@ -107,6 +111,7 @@ typedef struct opts {
 opts_t *opts_new(void) MALLOC;
 void opts_free(opts_t *) NONNULL(1);
 int opts_has_ssl_spec(opts_t *) NONNULL(1) WUNRES;
+int opts_has_dns_spec(opts_t *) NONNULL(1) WUNRES;
 void opts_proto_force(opts_t *, const char *, const char *) NONNULL(1,2,3);
 void opts_proto_disable(opts_t *, const char *, const char *) NONNULL(1,2,3);
 void opts_proto_dbg_dump(opts_t *) NONNULL(1);
@@ -114,6 +119,7 @@ void opts_proto_dbg_dump(opts_t *) NONNULL(1);
 
 proxyspec_t * proxyspec_parse(int *, char **[], const char *) MALLOC;
 void proxyspec_free(proxyspec_t *) NONNULL(1);
+char * proxyspec_str(proxyspec_t *) NONNULL(1) MALLOC;
 
 #endif /* !OPTS_H */
 

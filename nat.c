@@ -1,6 +1,6 @@
 /*
- * SSLsplit - transparent and scalable SSL/TLS interception
- * Copyright (c) 2009-2014, Daniel Roethlisberger <daniel@roe.ch>
+ * SSLsplit - transparent SSL/TLS interception
+ * Copyright (c) 2009-2016, Daniel Roethlisberger <daniel@roe.ch>
  * All rights reserved.
  * http://www.roe.ch/SSLsplit
  *
@@ -8,8 +8,7 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice unmodified, this list of conditions, and the following
- *    disclaimer.
+ *    notice, this list of conditions, and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
@@ -574,6 +573,15 @@ nat_preinit(void)
 			return -1;
 	}
 	return 0;
+}
+
+/*
+ * Undo nat_preinit - close all file descriptors, for use in privsep parent.
+ */
+void
+nat_preinit_undo(void)
+{
+	nat_fini();
 }
 
 /*

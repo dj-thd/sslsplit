@@ -1,6 +1,6 @@
 /*
- * SSLsplit - transparent and scalable SSL/TLS interception
- * Copyright (c) 2009-2014, Daniel Roethlisberger <daniel@roe.ch>
+ * SSLsplit - transparent SSL/TLS interception
+ * Copyright (c) 2009-2016, Daniel Roethlisberger <daniel@roe.ch>
  * All rights reserved.
  * http://www.roe.ch/SSLsplit
  *
@@ -8,8 +8,7 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice unmodified, this list of conditions, and the following
- *    disclaimer.
+ *    notice, this list of conditions, and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
@@ -67,6 +66,16 @@ static char *argv10[] = {
 	"https", "127.0.0.1", "10443",
 	"https", "::1", "10443"
 };
+static char *argv11[] = {
+	"autossl", "127.0.0.1", "10025"
+};
+static char *argv12[] = {
+	"autossl", "127.0.0.1", "10025", "127.0.0.2", "25",
+	"https", "127.0.0.1", "10443", "127.0.0.2", "443",
+};
+static char *argv13[] = {
+	"autossl", "127.0.0.1", "10025", "sni", "25"
+};
 
 #define NATENGINE "pf"
 
@@ -80,6 +89,7 @@ START_TEST(proxyspec_parse_01)
 	fail_unless(!!spec, "failed to parse spec");
 	fail_unless(spec->ssl, "not SSL");
 	fail_unless(spec->http, "not HTTP");
+	fail_unless(!spec->upgrade, "Upgrade");
 	fail_unless(spec->listen_addrlen == sizeof(struct sockaddr_in),
 	            "not IPv4 listen addr");
 	fail_unless(spec->connect_addrlen == sizeof(struct sockaddr_in),
@@ -103,6 +113,7 @@ START_TEST(proxyspec_parse_02)
 	fail_unless(!!spec, "failed to parse spec");
 	fail_unless(spec->ssl, "not SSL");
 	fail_unless(spec->http, "not HTTP");
+	fail_unless(!spec->upgrade, "Upgrade");
 	fail_unless(spec->listen_addrlen == sizeof(struct sockaddr_in6),
 	            "not IPv6 listen addr");
 	fail_unless(spec->connect_addrlen == sizeof(struct sockaddr_in6),
@@ -152,6 +163,7 @@ START_TEST(proxyspec_parse_05)
 	fail_unless(!!spec, "failed to parse spec");
 	fail_unless(!spec->ssl, "SSL");
 	fail_unless(spec->http, "not HTTP");
+	fail_unless(!spec->upgrade, "Upgrade");
 	fail_unless(spec->listen_addrlen == sizeof(struct sockaddr_in),
 	            "not IPv4 listen addr");
 	fail_unless(spec->connect_addrlen == sizeof(struct sockaddr_in),
@@ -175,6 +187,7 @@ START_TEST(proxyspec_parse_06)
 	fail_unless(!!spec, "failed to parse spec");
 	fail_unless(spec->ssl, "not SSL");
 	fail_unless(!spec->http, "HTTP");
+	fail_unless(!spec->upgrade, "Upgrade");
 	fail_unless(spec->listen_addrlen == sizeof(struct sockaddr_in),
 	            "not IPv4 listen addr");
 	fail_unless(spec->connect_addrlen == sizeof(struct sockaddr_in),
@@ -198,6 +211,7 @@ START_TEST(proxyspec_parse_07)
 	fail_unless(!!spec, "failed to parse spec");
 	fail_unless(!spec->ssl, "SSL");
 	fail_unless(!spec->http, "HTTP");
+	fail_unless(!spec->upgrade, "Upgrade");
 	fail_unless(spec->listen_addrlen == sizeof(struct sockaddr_in),
 	            "not IPv4 listen addr");
 	fail_unless(spec->connect_addrlen == sizeof(struct sockaddr_in),
@@ -221,6 +235,7 @@ START_TEST(proxyspec_parse_08)
 	fail_unless(!!spec, "failed to parse spec");
 	fail_unless(spec->ssl, "not SSL");
 	fail_unless(spec->http, "not HTTP");
+	fail_unless(!spec->upgrade, "Upgrade");
 	fail_unless(spec->listen_addrlen == sizeof(struct sockaddr_in),
 	            "not IPv4 listen addr");
 	fail_unless(!spec->connect_addrlen, "connect addr set");
@@ -269,6 +284,7 @@ START_TEST(proxyspec_parse_11)
 	fail_unless(!!spec, "failed to parse spec");
 	fail_unless(spec->ssl, "not SSL");
 	fail_unless(spec->http, "not HTTP");
+	fail_unless(!spec->upgrade, "Upgrade");
 	fail_unless(spec->listen_addrlen == sizeof(struct sockaddr_in),
 	            "not IPv4 listen addr");
 	fail_unless(!spec->connect_addrlen, "connect addr set");
@@ -305,6 +321,7 @@ START_TEST(proxyspec_parse_13)
 	fail_unless(!!spec, "failed to parse spec");
 	fail_unless(spec->ssl, "not SSL");
 	fail_unless(spec->http, "not HTTP");
+	fail_unless(!spec->upgrade, "Upgrade");
 	fail_unless(spec->listen_addrlen == sizeof(struct sockaddr_in6),
 	            "not IPv6 listen addr");
 	fail_unless(spec->connect_addrlen == sizeof(struct sockaddr_in6),
@@ -316,6 +333,7 @@ START_TEST(proxyspec_parse_13)
 	fail_unless(!!spec->next, "next is not set");
 	fail_unless(spec->next->ssl, "not SSL");
 	fail_unless(spec->next->http, "not HTTP");
+	fail_unless(!spec->next->upgrade, "Upgrade");
 	fail_unless(spec->next->listen_addrlen == sizeof(struct sockaddr_in),
 	            "not IPv4 listen addr");
 	fail_unless(spec->next->connect_addrlen == sizeof(struct sockaddr_in),
@@ -338,6 +356,7 @@ START_TEST(proxyspec_parse_14)
 	fail_unless(!!spec, "failed to parse spec");
 	fail_unless(spec->ssl, "not SSL");
 	fail_unless(spec->http, "not HTTP");
+	fail_unless(!spec->upgrade, "Upgrade");
 	fail_unless(spec->listen_addrlen == sizeof(struct sockaddr_in6),
 	            "not IPv6 listen addr");
 	fail_unless(!spec->connect_addrlen, "connect addr set");
@@ -349,6 +368,7 @@ START_TEST(proxyspec_parse_14)
 	fail_unless(!!spec->next, "next is not set");
 	fail_unless(spec->next->ssl, "not SSL");
 	fail_unless(spec->next->http, "not HTTP");
+	fail_unless(!spec->next->upgrade, "Upgrade");
 	fail_unless(spec->next->listen_addrlen == sizeof(struct sockaddr_in),
 	            "not IPv4 listen addr");
 	fail_unless(!spec->next->connect_addrlen, "connect addr set");
@@ -359,6 +379,77 @@ START_TEST(proxyspec_parse_14)
 	fail_unless(!spec->next->natlookup, "natlookup() is set");
 	fail_unless(!spec->next->natsocket, "natsocket() is set");
 	proxyspec_free(spec);
+}
+END_TEST
+
+START_TEST(proxyspec_parse_15)
+{
+	proxyspec_t *spec;
+	int argc = 3;
+	char **argv = argv11;
+
+	spec = proxyspec_parse(&argc, &argv, NATENGINE);
+	fail_unless(!!spec, "failed to parse spec");
+	fail_unless(!spec->ssl, "SSL");
+	fail_unless(!spec->http, "HTTP");
+	fail_unless(spec->upgrade, "not Upgrade");
+	fail_unless(spec->listen_addrlen == sizeof(struct sockaddr_in),
+	            "not IPv4 listen addr");
+	fail_unless(!spec->connect_addrlen, "connect addr set");
+	fail_unless(!spec->sni_port, "SNI port is set");
+	fail_unless(!!spec->natengine, "natengine is not set");
+	fail_unless(!spec->natlookup, "natlookup() is set");
+	fail_unless(!spec->natsocket, "natsocket() is set");
+	fail_unless(!spec->next, "next is set");
+	proxyspec_free(spec);
+}
+END_TEST
+
+START_TEST(proxyspec_parse_16)
+{
+	proxyspec_t *spec;
+	int argc = 10;
+	char **argv = argv12;
+
+	spec = proxyspec_parse(&argc, &argv, NATENGINE);
+	fail_unless(!!spec, "failed to parse spec");
+	fail_unless(spec->ssl, "not SSL");
+	fail_unless(spec->http, "not HTTP");
+	fail_unless(!spec->upgrade, "Upgrade");
+	fail_unless(spec->listen_addrlen == sizeof(struct sockaddr_in),
+	            "not IPv4 listen addr");
+	fail_unless(spec->connect_addrlen == sizeof(struct sockaddr_in),
+	            "not IPv4 connect addr");
+	fail_unless(!spec->sni_port, "SNI port is set");
+	fail_unless(!spec->natengine, "natengine is set");
+	fail_unless(!spec->natlookup, "natlookup() is set");
+	fail_unless(!spec->natsocket, "natsocket() is set");
+	fail_unless(!!spec->next, "next is not set");
+	fail_unless(!spec->next->ssl, "SSL");
+	fail_unless(!spec->next->http, "HTTP");
+	fail_unless(spec->next->upgrade, "not Upgrade");
+	fail_unless(spec->next->listen_addrlen == sizeof(struct sockaddr_in),
+	            "not IPv4 listen addr");
+	fail_unless(spec->next->connect_addrlen == sizeof(struct sockaddr_in),
+	            "not IPv4 connect addr");
+	fail_unless(!spec->next->sni_port, "SNI port is set");
+	fail_unless(!spec->next->natengine, "natengine is set");
+	fail_unless(!spec->next->natlookup, "natlookup() is set");
+	fail_unless(!spec->next->natsocket, "natsocket() is set");
+	proxyspec_free(spec);
+}
+END_TEST
+
+START_TEST(proxyspec_parse_17)
+{
+	proxyspec_t *spec;
+	int argc = 5;
+	char **argv = argv13;
+
+	close(2);
+	spec = proxyspec_parse(&argc, &argv, NATENGINE);
+	if (spec)
+		proxyspec_free(spec);
 }
 END_TEST
 
@@ -386,7 +477,9 @@ opts_suite(void)
 
 	tc = tcase_create("proxyspec_parse");
 	tcase_add_test(tc, proxyspec_parse_01);
-	tcase_add_test(tc, proxyspec_parse_02);
+#ifndef TRAVIS
+	tcase_add_test(tc, proxyspec_parse_02); /* IPv6 */
+#endif /* TRAVIS */
 	tcase_add_exit_test(tc, proxyspec_parse_03, EXIT_FAILURE);
 	tcase_add_exit_test(tc, proxyspec_parse_04, EXIT_FAILURE);
 	tcase_add_test(tc, proxyspec_parse_05);
@@ -397,8 +490,13 @@ opts_suite(void)
 	tcase_add_exit_test(tc, proxyspec_parse_10, EXIT_FAILURE);
 	tcase_add_test(tc, proxyspec_parse_11);
 	tcase_add_exit_test(tc, proxyspec_parse_12, EXIT_FAILURE);
-	tcase_add_test(tc, proxyspec_parse_13);
-	tcase_add_test(tc, proxyspec_parse_14);
+#ifndef TRAVIS
+	tcase_add_test(tc, proxyspec_parse_13); /* IPv6 */
+	tcase_add_test(tc, proxyspec_parse_14); /* IPv6 */
+#endif /* TRAVIS */
+	tcase_add_test(tc, proxyspec_parse_15);
+	tcase_add_test(tc, proxyspec_parse_16);
+	tcase_add_exit_test(tc, proxyspec_parse_17, EXIT_FAILURE);
 	suite_add_tcase(s, tc);
 
 	tc = tcase_create("opts_debug");

@@ -1,6 +1,6 @@
 /*
- * SSLsplit - transparent and scalable SSL/TLS interception
- * Copyright (c) 2009-2014, Daniel Roethlisberger <daniel@roe.ch>
+ * SSLsplit - transparent SSL/TLS interception
+ * Copyright (c) 2009-2016, Daniel Roethlisberger <daniel@roe.ch>
  * All rights reserved.
  * http://www.roe.ch/SSLsplit
  *
@@ -8,8 +8,7 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice unmodified, this list of conditions, and the following
- *    disclaimer.
+ *    notice, this list of conditions, and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
@@ -29,11 +28,14 @@
 #include "sys.h"
 
 #include "log.h"
+#include "defaults.h"
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <fcntl.h>
@@ -76,6 +78,7 @@ sys_privdrop(const char *username, const char *groupname, const char *jaildir)
 	int ret = -1;
 
 	if (groupname) {
+		errno = 0;
 		if (!(gr = getgrnam(groupname))) {
 			log_err_printf("Failed to getgrnam group '%s': %s\n",
 			               groupname, strerror(errno));
@@ -84,6 +87,7 @@ sys_privdrop(const char *username, const char *groupname, const char *jaildir)
 	}
 
 	if (username) {
+		errno = 0;
 		if (!(pw = getpwnam(username))) {
 			log_err_printf("Failed to getpwnam user '%s': %s\n",
 			               username, strerror(errno));
@@ -142,6 +146,42 @@ error:
 }
 
 /*
+ * Returns 1 if username can be loaded from user database, 0 otherwise.
+ */
+int
+sys_isuser(const char *username)
+{
+	errno = 0;
+	if (!getpwnam(username)) {
+		if (errno != 0 && errno != ENOENT) {
+			log_err_printf("Failed to load user '%s': %s (%i)\n",
+			               username, strerror(errno), errno);
+		}
+		return 0;
+	}
+
+	endpwent();
+	return 1;
+}
+
+/*
+ * Returns 1 if groupname can be loaded from group database, 0 otherwise.
+ */
+int
+sys_isgroup(const char *groupname)
+{
+	errno = 0;
+	if (!getgrnam(groupname)) {
+		if (errno != 0 && errno != ENOENT) {
+			log_err_printf("Failed to load group '%s': %s (%i)\n",
+			               groupname, strerror(errno), errno);
+		}
+		return 0;
+	}
+	return 1;
+}
+
+/*
  * Open and lock process ID file fn.
  * Returns open file descriptor on success or -1 on errors.
  */
@@ -150,7 +190,7 @@ sys_pidf_open(const char *fn)
 {
 	int fd;
 
-	if ((fd = open(fn, O_RDWR|O_CREAT, 0640)) == -1) {
+	if ((fd = open(fn, O_RDWR|O_CREAT, DFLT_PIDFMODE)) == -1) {
 		log_err_printf("Failed to open '%s': %s\n", fn,
 		               strerror(errno));
 		return -1;
@@ -335,33 +375,78 @@ sys_sockaddr_parse(struct sockaddr_storage *addr, socklen_t *addrlen,
 }
 
 /*
- * Converts an IPv4/IPv6 sockaddr into a printable string representation.
- * Returns an allocated buffer which must be freed by caller, or NULL on error.
+ * Converts an IPv4/IPv6 sockaddr into printable string representations of the
+ * host and the service (port) part.  Writes allocated buffers to *host and
+ * *serv which must both be freed by the caller.  Neither *host nor *port are
+ * freed by this function before newly allocating.
+ * Returns 0 on success, -1 otherwise.  When -1 is returned, pointers in *host
+ * and *serv are invalid and must not be used nor freed by the caller.
  */
-char *
-sys_sockaddr_str(struct sockaddr *addr, socklen_t addrlen)
+int
+sys_sockaddr_str(struct sockaddr *addr, socklen_t addrlen,
+                 char **host, char **serv)
 {
-	char host[INET6_ADDRSTRLEN], serv[6];
-	char *buf;
+	char tmphost[INET6_ADDRSTRLEN];
 	int rv;
-	size_t bufsz;
+	size_t hostsz;
 
-	bufsz = sizeof(host) + sizeof(serv) + 3;
-	buf = malloc(bufsz);
-	if (!buf) {
+	*serv = malloc(6); /* max decimal digits of short plus terminator */
+	if (!*serv) {
 		log_err_printf("Cannot allocate memory\n");
-		return NULL;
+		return -1;
 	}
-	rv = getnameinfo(addr, addrlen, host, sizeof(host), serv, sizeof(serv),
+	rv = getnameinfo(addr, addrlen,
+	                 tmphost, sizeof(tmphost),
+	                 *serv, 6,
 	                 NI_NUMERICHOST | NI_NUMERICSERV);
 	if (rv != 0) {
 		log_err_printf("Cannot get nameinfo for socket address: %s\n",
 		               gai_strerror(rv));
-		free(buf);
-		return NULL;
+		free(*serv);
+		return -1;
 	}
-	snprintf(buf, bufsz, "[%s]:%s", host, serv);
-	return buf;
+	hostsz = strlen(tmphost) + 1; /* including terminator */
+	*host = malloc(hostsz);
+	if (!*host) {
+		log_err_printf("Cannot allocate memory\n");
+		free(*serv);
+		return -1;
+	}
+	memcpy(*host, tmphost, hostsz);
+	return 0;
+}
+
+/*
+ * Sanitizes a valid IPv4 or IPv6 address for use in a filename, i.e. removes
+ * characters that are invalid on NTFS and replaces them with more innocent
+ * characters.  The function assumes that the input is a valid IPv4 or IPv6
+ * address; it is not a generic filename sanitizer.
+ *
+ * Returns a copy of string s that must be freed by the caller.
+ *
+ * Invalid NTFS characters are < > : " / \ | ? * according to
+ * https://msdn.microsoft.com/en-gb/library/windows/desktop/aa365247.aspx
+ */
+char *
+sys_ip46str_sanitize(const char *s)
+{
+	char *copy, *p;
+
+	copy = strdup(s);
+	if (!copy)
+		return NULL;
+	p = copy;
+	while (*p) {
+		switch (*p) {
+		case ':':
+		case '%':
+			*p = '_';
+			break;
+		}
+		p++;
+	}
+
+	return copy;
 }
 
 /*
@@ -393,8 +478,13 @@ sys_isdir(const char *path)
 {
 	struct stat s;
 
-	if (stat(path, &s) == -1)
+	if (stat(path, &s) == -1) {
+		if (errno != ENOENT) {
+			log_err_printf("Error stating file: %s (%i)\n",
+			               strerror(errno), errno);
+		}
 		return 0;
+	}
 	if (s.st_mode & S_IFDIR)
 		return 1;
 	return 0;
@@ -447,11 +537,11 @@ sys_mkpath(const char *path, mode_t mode)
 	return 0;
 }
 
-
 /*
  * Iterate over all files in a directory hierarchy, calling the callback
  * cb for each file, passing the filename and arg as arguments.  Files and
  * directories beginning with a dot are skipped, symlinks are followed.
+ * FIXME - there is no facility to return errors from the file handlers
  */
 int
 sys_dir_eachfile(const char *dirname, sys_dir_eachfile_cb_t cb, void *arg)
@@ -518,4 +608,255 @@ sys_get_cpu_cores(void)
 #endif /* !_SC_NPROCESSORS_ONLN */
 }
 
+/*
+ * Send a message and optional file descriptor on a connected AF_UNIX
+ * SOCKET_DGRAM socket s.  Returns the return value of sendmsg().
+ * If fd is -1, no file descriptor is passed.
+ */
+ssize_t
+sys_sendmsgfd(int sock, void *buf, size_t bufsz, int fd)
+{
+	struct iovec iov;
+	struct msghdr msg;
+	struct cmsghdr *cmsg;
+	char cmsgbuf[CMSG_SPACE(sizeof(int))];
+	ssize_t n;
+
+	iov.iov_base = buf;
+	iov.iov_len = bufsz;
+
+	msg.msg_name = NULL;
+	msg.msg_namelen = 0;
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+
+	if (fd != -1) {
+		msg.msg_control = cmsgbuf;
+		msg.msg_controllen = sizeof(cmsgbuf);
+
+		cmsg = CMSG_FIRSTHDR(&msg);
+		if (!cmsg)
+			return -1;
+		cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+		cmsg->cmsg_level = SOL_SOCKET;
+		cmsg->cmsg_type = SCM_RIGHTS;
+
+		*((int *) CMSG_DATA(cmsg)) = fd;
+	} else {
+		msg.msg_control = NULL;
+		msg.msg_controllen = 0;
+	}
+	do {
+#ifdef MSG_NOSIGNAL
+		n = sendmsg(sock, &msg, MSG_NOSIGNAL);
+#else /* !MSG_NOSIGNAL */
+		n = sendmsg(sock, &msg, 0);
+#endif /* !MSG_NOSIGNAL */
+	} while (n == -1 && errno == EINTR);
+	return n;
+}
+
+/*
+ * Receive a message and optional file descriptor on a connected AF_UNIX
+ * SOCKET_DGRAM socket s.  Returns the return value of recvmsg()/recv()
+ * and sets errno to EINVAL if the received message is malformed.
+ * If pfd is NULL, no file descriptor is received; if a file descriptor was
+ * part of the received message and pfd is NULL, then the kernel will close it.
+ */
+ssize_t
+sys_recvmsgfd(int sock, void *buf, size_t bufsz, int *pfd)
+{
+	ssize_t n;
+
+	if (pfd) {
+		struct iovec iov;
+		struct msghdr msg;
+		struct cmsghdr *cmsg;
+		unsigned char cmsgbuf[CMSG_SPACE(sizeof(int))];
+
+		iov.iov_base = buf;
+		iov.iov_len = bufsz;
+
+		msg.msg_name = NULL;
+		msg.msg_namelen = 0;
+		msg.msg_iov = &iov;
+		msg.msg_iovlen = 1;
+		msg.msg_control = cmsgbuf;
+		msg.msg_controllen = sizeof(cmsgbuf);
+		do {
+			n = recvmsg(sock, &msg, 0);
+		} while (n == -1 && errno == EINTR);
+		if (n <= 0)
+			return n;
+		cmsg = CMSG_FIRSTHDR(&msg);
+		if (cmsg && cmsg->cmsg_len == CMSG_LEN(sizeof(int))) {
+			if (cmsg->cmsg_level != SOL_SOCKET) {
+				errno = EINVAL;
+				return -1;
+			}
+			if (cmsg->cmsg_type != SCM_RIGHTS) {
+				errno = EINVAL;
+				return -1;
+			}
+			*pfd = *((int *) CMSG_DATA(cmsg));
+		} else {
+			*pfd = -1;
+		}
+	} else {
+		do {
+			n = recv(sock, buf, bufsz, 0);
+		} while (n == -1 && errno == EINTR);
+	}
+	return n;
+}
+
+/*
+ * Format AF_UNIX socket address into printable string.
+ * Returns newly allocated string that must be freed by caller.
+ */
+static char *
+sys_afunix_str(struct sockaddr *addr, socklen_t addrlen)
+{
+	struct sockaddr_un *sun = (struct sockaddr_un *)addr;
+	char *name;
+
+	if (addrlen == sizeof(sa_family_t)) {
+		asprintf(&name, "unnmd");
+	} else if (sun->sun_path[0] == '\0') {
+		/* abstract sockets is a Linux feature */
+		asprintf(&name, "abstr:%02x:%02x:%02x:%02x",
+				sun->sun_path[1],
+				sun->sun_path[2],
+				sun->sun_path[3],
+				sun->sun_path[4]);
+	} else {
+		asprintf(&name, "pname:%s", sun->sun_path);
+	}
+
+	return name;
+}
+
+/*
+ * Dump all open file descriptors to stdout - poor man's lsof/fstat/sockstat
+ */
+void
+sys_dump_fds(void)
+{
+	int maxfd = 0;
+
+#ifdef F_MAXFD
+	if (!maxfd && ((maxfd = fcntl(0, F_MAXFD)) == -1)) {
+		fprintf(stderr, "fcntl(0, F_MAXFD) failed: %s (%i)\n",
+		                strerror(errno), errno);
+	}
+#endif /* F_MAXFD */
+#ifdef _SC_OPEN_MAX
+	if (!maxfd && ((maxfd = sysconf(_SC_OPEN_MAX)) == -1)) {
+		fprintf(stderr, "sysconf(_SC_OPEN_MAX) failed: %s (%i)\n",
+		                strerror(errno), errno);
+	}
+#endif /* _SC_OPEN_MAX */
+	if (!maxfd)
+		maxfd = 65535;
+
+	for (int fd = 0; fd <= maxfd; fd++) {
+		struct stat st;
+
+		if (fstat(fd, &st) == -1) {
+			continue;
+		}
+
+		printf("%5d:", fd);
+		switch (st.st_mode & S_IFMT) {
+		case S_IFBLK:  printf(" blkdev"); break;
+		case S_IFCHR:  printf(" chrdev"); break;
+		case S_IFDIR:  printf(" dir   "); break;
+		case S_IFIFO:  printf(" fifo  "); break;
+		case S_IFLNK:  printf(" lnkfil"); break;
+		case S_IFREG:  printf(" regfil"); break;
+		case S_IFSOCK: printf(" socket"); break;
+		default:       printf(" unknwn"); break;
+		}
+
+		if ((st.st_mode & S_IFMT) == S_IFSOCK) {
+			int lrv, frv;
+			struct sockaddr_storage lss, fss;
+			socklen_t lsslen = sizeof(lss);
+			socklen_t fsslen = sizeof(fss);
+			char *laddrstr, *faddrstr;
+
+			lrv = getsockname(fd, (struct sockaddr *)&lss, &lsslen);
+			frv = getpeername(fd, (struct sockaddr *)&fss, &fsslen);
+
+			switch (lss.ss_family) {
+			case AF_INET:
+			case AF_INET6: {
+				if (lrv == 0) {
+					char *host, *port;
+					if (sys_sockaddr_str(
+					        (struct sockaddr *)&lss,
+					        lsslen,
+					        &host, &port) != 0) {
+						laddrstr = strdup("?");
+					} else {
+						asprintf(&laddrstr, "[%s]:%s",
+						         host, port);
+						free(host);
+						free(port);
+					}
+				} else {
+					laddrstr = strdup("n/a");
+				}
+				if (frv == 0) {
+					char *host, *port;
+					if (sys_sockaddr_str(
+					        (struct sockaddr *)&fss,
+					        fsslen,
+					        &host, &port) != 0) {
+						faddrstr = strdup("?");
+					} else {
+						asprintf(&faddrstr, "[%s]:%s",
+						         host, port);
+						free(host);
+						free(port);
+					}
+				} else {
+					faddrstr = strdup("n/a");
+				}
+				printf(" %-6s %s -> %s",
+				       lss.ss_family == AF_INET ? "in" : "in6",
+				       laddrstr, faddrstr);
+				free(laddrstr);
+				free(faddrstr);
+				break;
+			}
+			case AF_UNIX: {
+				if (lrv == 0) {
+					laddrstr = sys_afunix_str((struct sockaddr *)&lss, lsslen);
+				} else {
+					laddrstr = strdup("n/a");
+				}
+				if (frv == 0) {
+					faddrstr = sys_afunix_str((struct sockaddr *)&fss, fsslen);
+				} else {
+					faddrstr = strdup("n/a");
+				}
+				printf(" unix   %s -> %s", laddrstr, faddrstr);
+				free(laddrstr);
+				free(faddrstr);
+				break;
+			}
+			case AF_UNSPEC: {
+				printf(" unspec");
+				break;
+			}
+			default:
+				printf(" (%i)", lss.ss_family);
+			}
+		}
+		printf("\n");
+	}
+}
+
 /* vim: set noet ft=c: */
+

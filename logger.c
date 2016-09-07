@@ -1,6 +1,6 @@
 /*
- * SSLsplit - transparent and scalable SSL/TLS interception
- * Copyright (c) 2009-2014, Daniel Roethlisberger <daniel@roe.ch>
+ * SSLsplit - transparent SSL/TLS interception
+ * Copyright (c) 2009-2016, Daniel Roethlisberger <daniel@roe.ch>
  * All rights reserved.
  * http://www.roe.ch/SSLsplit
  *
@@ -8,8 +8,7 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice unmodified, this list of conditions, and the following
- *    disclaimer.
+ *    notice, this list of conditions, and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
@@ -45,15 +44,18 @@
 
 struct logger {
 	pthread_t thr;
+	logger_reopen_func_t reopen;
 	logger_open_func_t open;
 	logger_close_func_t close;
 	logger_prep_func_t prep;
 	logger_write_func_t write;
+	logger_except_func_t except;
 	thrqueue_t *queue;
 };
 
-#define LBFLAG_OPEN	1
-#define LBFLAG_CLOSE	2
+#define LBFLAG_REOPEN	(1 << 0)
+#define LBFLAG_OPEN	(1 << 1)
+#define LBFLAG_CLOSE	(1 << 2)
 
 static void
 logger_clear(logger_t *logger)
@@ -67,8 +69,9 @@ logger_clear(logger_t *logger)
  * not in the thread calling logger_submit().
  */
 logger_t *
-logger_new(logger_open_func_t openfunc, logger_close_func_t closefunc,
-           logger_write_func_t writefunc, logger_prep_func_t prepfunc)
+logger_new(logger_reopen_func_t reopenfunc, logger_open_func_t openfunc,
+           logger_close_func_t closefunc, logger_write_func_t writefunc,
+           logger_prep_func_t prepfunc, logger_except_func_t exceptfunc)
 {
 	logger_t *logger;
 
@@ -76,10 +79,12 @@ logger_new(logger_open_func_t openfunc, logger_close_func_t closefunc,
 	if (!logger)
 		return NULL;
 	logger_clear(logger);
+	logger->reopen = reopenfunc;
 	logger->open = openfunc;
 	logger->close = closefunc;
 	logger->write = writefunc;
 	logger->prep = prepfunc;
+	logger->except = exceptfunc;
 	logger->queue = NULL;
 	return logger;
 }
@@ -99,7 +104,7 @@ logger_free(logger_t *logger) {
 /*
  * Submit a buffer to be logged by the logger thread.
  * Calls the prep callback from within the calling tread before submission.
- * Buffer will be freed after logging completes or on failure.
+ * Buffer guaranteed to be freed after logging completes or on failure.
  * Returns -1 on error, 0 on success.
  */
 int
@@ -112,6 +117,27 @@ logger_submit(logger_t *logger, void *fh, unsigned long prepflags,
 		return -1;
 	lb->fh = fh;
 	logbuf_ctl_clear(lb);
+	if (thrqueue_enqueue(logger->queue, lb)) {
+		return 0;
+	} else {
+		logbuf_free(lb);
+		return -1;
+	}
+}
+
+/*
+ * Submit a log reopen event to the logger thread.
+ */
+int
+logger_reopen(logger_t *logger)
+{
+	logbuf_t *lb;
+
+	if (!logger->reopen)
+		return 0;
+
+	lb = logbuf_new(NULL, 0, NULL, NULL);
+	logbuf_ctl_set(lb, LBFLAG_REOPEN);
 	return thrqueue_enqueue(logger->queue, lb) ? 0 : -1;
 }
 
@@ -121,7 +147,8 @@ logger_submit(logger_t *logger, void *fh, unsigned long prepflags,
  * If no open callback is configured, returns successfully.
  * Returns 0 on success, -1 on failure.
  */
-int logger_open(logger_t *logger, void *fh)
+int
+logger_open(logger_t *logger, void *fh)
 {
 	logbuf_t *lb;
 
@@ -139,7 +166,8 @@ int logger_open(logger_t *logger, void *fh)
  * If no close callback is configured, returns successfully.
  * Returns 0 on success, -1 on failure.
  */
-int logger_close(logger_t *logger, void *fh)
+int
+logger_close(logger_t *logger, void *fh)
 {
 	logbuf_t *lb;
 
@@ -160,14 +188,24 @@ logger_thread(void *arg)
 {
 	logger_t *logger = arg;
 	logbuf_t *lb;
+	int e = 0;
 
 	while ((lb = thrqueue_dequeue(logger->queue))) {
-		if (logbuf_ctl_isset(lb, LBFLAG_OPEN)) {
-			logger->open(lb->fh);
+		if (logbuf_ctl_isset(lb, LBFLAG_REOPEN)) {
+			if (logger->reopen() != 0)
+				e = 1;
+		} else if (logbuf_ctl_isset(lb, LBFLAG_OPEN)) {
+			if (logger->open(lb->fh) != 0)
+				e = 1;
 		} else if (logbuf_ctl_isset(lb, LBFLAG_CLOSE)) {
 			logger->close(lb->fh);
 		} else {
-			logbuf_write_free(lb, logger->write);
+			if (logbuf_write_free(lb, logger->write) < 0)
+				e = 1;
+		}
+
+		if (e && logger->except) {
+			logger->except();
 		}
 	}
 

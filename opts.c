@@ -1,6 +1,6 @@
 /*
- * SSLsplit - transparent and scalable SSL/TLS interception
- * Copyright (c) 2009-2014, Daniel Roethlisberger <daniel@roe.ch>
+ * SSLsplit - transparent SSL/TLS interception
+ * Copyright (c) 2009-2016, Daniel Roethlisberger <daniel@roe.ch>
  * All rights reserved.
  * http://www.roe.ch/SSLsplit
  *
@@ -8,8 +8,7 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice unmodified, this list of conditions, and the following
- *    disclaimer.
+ *    notice, this list of conditions, and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
@@ -111,12 +110,20 @@ opts_free(opts_t *opts)
 	if(opts->redis_auth) {
 		free(opts->redis_auth);
 	}
+	if (opts->certgendir) {
+		free(opts->certgendir);
+	}
+	if (opts->contentlog_basedir) {
+		free(opts->contentlog_basedir);
+	}
 	memset(opts, 0, sizeof(opts_t));
 	free(opts);
 }
 
 /*
- * Return 1 if opts_t contains a proxyspec with ssl, 0 otherwise.
+ * Return 1 if opts_t contains a proxyspec that (eventually) uses SSL/TLS,
+ * 0 otherwise.  When 0, it is safe to assume that no SSL/TLS operations
+ * will take place with this configuration.
  */
 int
 opts_has_ssl_spec(opts_t *opts)
@@ -124,7 +131,24 @@ opts_has_ssl_spec(opts_t *opts)
 	proxyspec_t *p = opts->spec;
 
 	while (p) {
-		if (p->ssl)
+		if (p->ssl || p->upgrade)
+			return 1;
+		p = p->next;
+	}
+
+	return 0;
+}
+
+/*
+ * Return 1 if opts_t contains a proxyspec with dns, 0 otherwise.
+ */
+int
+opts_has_dns_spec(opts_t *opts)
+{
+	proxyspec_t *p = opts->spec;
+
+	while (p) {
+		if (p->dns)
 			return 1;
 		p = p->next;
 	}
@@ -144,31 +168,31 @@ opts_proto_force(opts_t *opts, const char *optarg, const char *argv0)
 		exit(EXIT_FAILURE);
 	}
 
-#if defined(SSL_OP_NO_SSLv2) && defined(WITH_SSLV2)
+#ifdef HAVE_SSLV2
 	if (!strcmp(optarg, "ssl2")) {
 		opts->sslmethod = SSLv2_method;
 	} else
-#endif /* SSL_OP_NO_SSLv2 && WITH_SSLV2 */
-#ifdef SSL_OP_NO_SSLv3
+#endif /* HAVE_SSLV2 */
+#ifdef HAVE_SSLV3
 	if (!strcmp(optarg, "ssl3")) {
 		opts->sslmethod = SSLv3_method;
 	} else
-#endif /* SSL_OP_NO_SSLv3 */
-#ifdef SSL_OP_NO_TLSv1
+#endif /* HAVE_SSLV3 */
+#ifdef HAVE_TLSV10
 	if (!strcmp(optarg, "tls10") || !strcmp(optarg, "tls1")) {
 		opts->sslmethod = TLSv1_method;
 	} else
-#endif /* SSL_OP_NO_TLSv1 */
-#ifdef SSL_OP_NO_TLSv1_1
+#endif /* HAVE_TLSV10 */
+#ifdef HAVE_TLSV11
 	if (!strcmp(optarg, "tls11")) {
 		opts->sslmethod = TLSv1_1_method;
 	} else
-#endif /* SSL_OP_NO_TLSv1_1 */
-#ifdef SSL_OP_NO_TLSv1_2
+#endif /* HAVE_TLSV11 */
+#ifdef HAVE_TLSV12
 	if (!strcmp(optarg, "tls12")) {
 		opts->sslmethod = TLSv1_2_method;
 	} else
-#endif /* SSL_OP_NO_TLSv1_2 */
+#endif /* HAVE_TLSV12 */
 	{
 		fprintf(stderr, "%s: Unsupported SSL/TLS protocol '%s'\n",
 		                argv0, optarg);
@@ -183,31 +207,31 @@ opts_proto_force(opts_t *opts, const char *optarg, const char *argv0)
 void
 opts_proto_disable(opts_t *opts, const char *optarg, const char *argv0)
 {
-#if defined(SSL_OP_NO_SSLv2) && defined(WITH_SSLV2)
+#ifdef HAVE_SSLV2
 	if (!strcmp(optarg, "ssl2")) {
 		opts->no_ssl2 = 1;
 	} else
-#endif /* SSL_OP_NO_SSLv2 && WITH_SSLV2 */
-#ifdef SSL_OP_NO_SSLv3
+#endif /* HAVE_SSLV2 */
+#ifdef HAVE_SSLV3
 	if (!strcmp(optarg, "ssl3")) {
 		opts->no_ssl3 = 1;
 	} else
-#endif /* SSL_OP_NO_SSLv3 */
-#ifdef SSL_OP_NO_TLSv1
+#endif /* HAVE_SSLV3 */
+#ifdef HAVE_TLSV10
 	if (!strcmp(optarg, "tls10") || !strcmp(optarg, "tls1")) {
 		opts->no_tls10 = 1;
 	} else
-#endif /* SSL_OP_NO_TLSv1 */
-#ifdef SSL_OP_NO_TLSv1_1
+#endif /* HAVE_TLSV10 */
+#ifdef HAVE_TLSV11
 	if (!strcmp(optarg, "tls11")) {
 		opts->no_tls11 = 1;
 	} else
-#endif /* SSL_OP_NO_TLSv1_1 */
-#ifdef SSL_OP_NO_TLSv1_2
+#endif /* HAVE_TLSV11 */
+#ifdef HAVE_TLSV12
 	if (!strcmp(optarg, "tls12")) {
 		opts->no_tls12 = 1;
 	} else
-#endif /* SSL_OP_NO_TLSv1_2 */
+#endif /* HAVE_TLSV12 */
 	{
 		fprintf(stderr, "%s: Unsupported SSL/TLS protocol '%s'\n",
 		                argv0, optarg);
@@ -222,41 +246,41 @@ void
 opts_proto_dbg_dump(opts_t *opts)
 {
 	log_dbg_printf("SSL/TLS protocol: %s%s%s%s%s%s\n",
-#if defined(SSL_OP_NO_SSLv2) && defined(WITH_SSLV2)
+#ifdef HAVE_SSLV2
 	               (opts->sslmethod == SSLv2_method) ? "nossl2" :
-#endif /* SSL_OP_NO_SSLv2 && WITH_SSLV2 */
-#ifdef SSL_OP_NO_SSLv3
+#endif /* HAVE_SSLV2 */
+#ifdef HAVE_SSLV3
 	               (opts->sslmethod == SSLv3_method) ? "ssl3" :
-#endif /* SSL_OP_NO_SSLv3 */
-#ifdef SSL_OP_NO_TLSv1
+#endif /* HAVE_SSLV3 */
+#ifdef HAVE_TLSV10
 	               (opts->sslmethod == TLSv1_method) ? "tls10" :
-#endif /* SSL_OP_NO_TLSv1 */
-#ifdef SSL_OP_NO_TLSv1_1
+#endif /* HAVE_TLSV10 */
+#ifdef HAVE_TLSV11
 	               (opts->sslmethod == TLSv1_1_method) ? "tls11" :
-#endif /* SSL_OP_NO_TLSv1_1 */
-#ifdef SSL_OP_NO_TLSv1_2
+#endif /* HAVE_TLSV11 */
+#ifdef HAVE_TLSV12
 	               (opts->sslmethod == TLSv1_2_method) ? "tls12" :
-#endif /* SSL_OP_NO_TLSv1_2 */
+#endif /* HAVE_TLSV12 */
 	               "negotiate",
-#if defined(SSL_OP_NO_SSLv2) && defined(WITH_SSLV2)
+#ifdef HAVE_SSLV2
 	               opts->no_ssl2 ? " -ssl2" :
-#endif /* SSL_OP_NO_SSLv2 && WITH_SSLV2 */
+#endif /* HAVE_SSLV2 */
 	               "",
-#ifdef SSL_OP_NO_SSLv3
+#ifdef HAVE_SSLV3
 	               opts->no_ssl3 ? " -ssl3" :
-#endif /* SSL_OP_NO_SSLv3 */
+#endif /* HAVE_SSLV3 */
 	               "",
-#ifdef SSL_OP_NO_TLSv1
+#ifdef HAVE_TLSV10
 	               opts->no_tls10 ? " -tls10" :
-#endif /* SSL_OP_NO_TLSv1 */
+#endif /* HAVE_TLSV10 */
 	               "",
-#ifdef SSL_OP_NO_TLSv1_1
+#ifdef HAVE_TLSV11
 	               opts->no_tls11 ? " -tls11" :
-#endif /* SSL_OP_NO_TLSv1_1 */
+#endif /* HAVE_TLSV11 */
 	               "",
-#ifdef SSL_OP_NO_TLSv1_2
+#ifdef HAVE_TLSV12
 	               opts->no_tls12 ? " -tls12" :
-#endif /* SSL_OP_NO_TLSv1_2 */
+#endif /* HAVE_TLSV12 */
 	               "");
 }
 
@@ -269,8 +293,8 @@ proxyspec_t *
 proxyspec_parse(int *argc, char **argv[], const char *natengine)
 {
 	proxyspec_t *curspec, *spec = NULL;
-	char *addr;
-	int af;
+	char *addr = NULL;
+	int af = AF_UNSPEC;
 	int state = 0;
 
 	while ((*argc)--) {
@@ -285,18 +309,27 @@ proxyspec_parse(int *argc, char **argv[], const char *natengine)
 				if (!strcmp(**argv, "tcp")) {
 					spec->ssl = 0;
 					spec->http = 0;
+					spec->upgrade = 0;
 				} else
 				if (!strcmp(**argv, "ssl")) {
 					spec->ssl = 1;
 					spec->http = 0;
+					spec->upgrade = 0;
 				} else
 				if (!strcmp(**argv, "http")) {
 					spec->ssl = 0;
 					spec->http = 1;
+					spec->upgrade = 0;
 				} else
 				if (!strcmp(**argv, "https")) {
 					spec->ssl = 1;
 					spec->http = 1;
+					spec->upgrade = 0;
+				} else
+				if (!strcmp(**argv, "autossl")) {
+					spec->ssl = 0;
+					spec->http = 0;
+					spec->upgrade = 1;
 				} else {
 					fprintf(stderr, "Unknown connection "
 					                "type '%s'\n", **argv);
@@ -344,7 +377,8 @@ proxyspec_parse(int *argc, char **argv[], const char *natengine)
 				if (!strcmp(**argv, "tcp") ||
 				    !strcmp(**argv, "ssl") ||
 				    !strcmp(**argv, "http") ||
-				    !strcmp(**argv, "https")) {
+				    !strcmp(**argv, "https") ||
+				    !strcmp(**argv, "autossl")) {
 					/* implicit default natengine */
 					(*argv)--; (*argc)++; /* rewind */
 					state = 0;
@@ -399,6 +433,7 @@ proxyspec_parse(int *argc, char **argv[], const char *natengine)
 					                **argv);
 					exit(EXIT_FAILURE);
 				}
+				spec->dns = 1;
 				state = 0;
 				break;
 		}
@@ -418,14 +453,60 @@ proxyspec_parse(int *argc, char **argv[], const char *natengine)
 void
 proxyspec_free(proxyspec_t *spec)
 {
-	while (spec) {
+	do {
 		proxyspec_t *next = spec->next;
 		if (spec->natengine)
 			free(spec->natengine);
 		memset(spec, 0, sizeof(proxyspec_t));
 		free(spec);
 		spec = next;
+	} while (spec);
+}
+
+/*
+ * Return text representation of proxy spec for display to the user.
+ * Returned string must be freed by caller.
+ */
+char *
+proxyspec_str(proxyspec_t *spec)
+{
+	char *s;
+	char *lhbuf, *lpbuf;
+	char *cbuf = NULL;
+	if (sys_sockaddr_str((struct sockaddr *)&spec->listen_addr,
+	                     spec->listen_addrlen, &lhbuf, &lpbuf) != 0) {
+		return NULL;
 	}
+	if (spec->connect_addrlen) {
+		char *chbuf, *cpbuf;
+		if (sys_sockaddr_str((struct sockaddr *)&spec->connect_addr,
+		                     spec->connect_addrlen,
+		                     &chbuf, &cpbuf) != 0) {
+			return NULL;
+		}
+		if (asprintf(&cbuf, "[%s]:%s", chbuf, cpbuf) < 0) {
+			return NULL;
+		}
+		free(chbuf);
+		free(cpbuf);
+	}
+	if (spec->sni_port) {
+		if (asprintf(&cbuf, "sni %i", spec->sni_port) < 0) {
+			return NULL;
+		}
+	}
+	if (asprintf(&s, "[%s]:%s %s%s%s %s", lhbuf, lpbuf,
+	             (spec->ssl ? "ssl" : "tcp"),
+	             (spec->upgrade ? "|upgrade" : ""),
+	             (spec->http ? "|http" : ""),
+	             (spec->natengine ? spec->natengine : cbuf)) < 0) {
+		s = NULL;
+	}
+	free(lhbuf);
+	free(lpbuf);
+	if (cbuf)
+		free(cbuf);
+	return s;
 }
 
 /* vim: set noet ft=c: */

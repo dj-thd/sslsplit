@@ -1,6 +1,6 @@
 /*
- * SSLsplit - transparent and scalable SSL/TLS interception
- * Copyright (c) 2009-2014, Daniel Roethlisberger <daniel@roe.ch>
+ * SSLsplit - transparent SSL/TLS interception
+ * Copyright (c) 2009-2016, Daniel Roethlisberger <daniel@roe.ch>
  * All rights reserved.
  * http://www.roe.ch/SSLsplit
  *
@@ -8,8 +8,7 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice unmodified, this list of conditions, and the following
- *    disclaimer.
+ *    notice, this list of conditions, and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
@@ -41,13 +40,16 @@ int sys_pidf_open(const char *) NONNULL(1) WUNRES;
 int sys_pidf_write(int) WUNRES;
 void sys_pidf_close(int, const char *) NONNULL(2);
 
+int sys_isuser(const char *) NONNULL(1) WUNRES;
+int sys_isgroup(const char *) NONNULL(1) WUNRES;
 char * sys_user_str(uid_t) MALLOC;
 char * sys_group_str(gid_t) MALLOC;
 
 int sys_sockaddr_parse(struct sockaddr_storage *, socklen_t *,
                        char *, char *, int, int) NONNULL(1,2,3,4) WUNRES;
-char * sys_sockaddr_str(struct sockaddr *, socklen_t) NONNULL(1) MALLOC;
-char * sys_sockaddr_str_ip(struct sockaddr *, socklen_t) NONNULL(1) MALLOC;
+int sys_sockaddr_str(struct sockaddr *, socklen_t,
+                     char **, char **) NONNULL(1,3,4);
+char * sys_ip46str_sanitize(const char *) NONNULL(1) MALLOC;
 
 int sys_isdir(const char *) NONNULL(1) WUNRES;
 int sys_mkpath(const char *, mode_t) NONNULL(1) WUNRES;
@@ -56,6 +58,13 @@ typedef void (*sys_dir_eachfile_cb_t)(const char *, void *) NONNULL(1);
 int sys_dir_eachfile(const char *, sys_dir_eachfile_cb_t, void *) NONNULL(1,2);
 
 uint32_t sys_get_cpu_cores(void) WUNRES;
+
+ssize_t sys_sendmsgfd(int, void *, size_t, int) NONNULL(2) WUNRES;
+ssize_t sys_recvmsgfd(int, void *, size_t, int *) NONNULL(2) WUNRES;
+
+void sys_dump_fds(void);
+
+char* sys_sockaddr_str_ip(struct sockaddr *addr, socklen_t addrlen);
 
 #endif /* !SYS_H */
 

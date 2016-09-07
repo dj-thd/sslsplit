@@ -1,6 +1,6 @@
 /*
- * SSLsplit - transparent and scalable SSL/TLS interception
- * Copyright (c) 2009-2014, Daniel Roethlisberger <daniel@roe.ch>
+ * SSLsplit - transparent SSL/TLS interception
+ * Copyright (c) 2009-2016, Daniel Roethlisberger <daniel@roe.ch>
  * All rights reserved.
  * http://www.roe.ch/SSLsplit
  *
@@ -8,8 +8,7 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice unmodified, this list of conditions, and the following
- *    disclaimer.
+ *    notice, this list of conditions, and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
@@ -81,37 +80,72 @@
 X509 * ssl_ssl_cert_get(SSL *);
 #endif /* OpenSSL 0.9.8y or 1.0.0k or 1.0.1e */
 
-#if defined(SSL_OP_NO_SSLv2) && defined(WITH_SSLV2)
-#define SSL2_S "ssl2 "
-#else /* !(SSL_OP_NO_SSLv2 && WITH_SSLV2) */
-#define SSL2_S ""
-#endif /* !(SSL_OP_NO_SSLv2 && WITH_SSLV2) */
-#ifdef SSL_OP_NO_SSLv3
-#define SSL3_S "ssl3 "
-#else /* !SSL_OP_NO_SSLv3 */
-#define SSL3_S ""
-#endif /* !SSL_OP_NO_SSLv3 */
+#ifdef OPENSSL_NO_TLSEXT
+#ifndef TLSEXT_MAXLEN_host_name
+#define TLSEXT_MAXLEN_host_name 255
+#endif /* !TLSEXT_MAXLEN_host_name */
+#endif /* OPENSSL_NO_TLSEXT */
+
+/*
+ * SSL_OP_NO_* is used as an indication that OpenSSL is sufficiently recent
+ * to have the respective protocol implemented.
+ *
+ * OPENSSL_NO_SSL2 indicates the complete removal of SSL 2.0 support.
+ *
+ * OPENSSL_NO_SSL3 indicates that no SSL 3.0 connections will be made by
+ * default, but support is still present, unless OPENSSL_NO_SSL3_METHOD is
+ * also defined.
+ */
+#if defined(SSL_OP_NO_SSLv2) && !defined(OPENSSL_NO_SSL2) && \
+    defined(WITH_SSLV2)
+#define HAVE_SSLV2
+#endif /* SSL_OP_NO_SSLv2 && !OPENSSL_NO_SSL2 && WITH_SSLV2 */
+#if defined(SSL_OP_NO_SSLv3) && !defined(OPENSSL_NO_SSL3_METHOD)
+#define HAVE_SSLV3
+#endif /* SSL_OP_NO_SSLv2 && !OPENSSL_NO_SSL3_METHOD */
 #ifdef SSL_OP_NO_TLSv1
-#define TLS10_S "tls10 "
-#else /* !SSL_OP_NO_TLSv1 */
-#define TLS10_S ""
-#endif /* !SSL_OP_NO_TLSv1 */
+#define HAVE_TLSV10
+#endif /* SSL_OP_NO_TLSv1 */
 #ifdef SSL_OP_NO_TLSv1_1
-#define TLS11_S "tls11 "
-#else /* !SSL_OP_NO_TLSv1_1 */
-#define TLS11_S ""
-#endif /* !SSL_OP_NO_TLSv1_1 */
+#define HAVE_TLSV11
+#endif /* SSL_OP_NO_TLSv1_1 */
 #ifdef SSL_OP_NO_TLSv1_2
+#define HAVE_TLSV12
+#endif /* SSL_OP_NO_TLSv1_2 */
+
+#ifdef HAVE_SSLV2
+#define SSL2_S "ssl2 "
+#else /* !HAVE_SSLV2 */
+#define SSL2_S ""
+#endif /* !HAVE_SSLV2 */
+#ifdef HAVE_SSLV3
+#define SSL3_S "ssl3 "
+#else /* !HAVE_SSLV3 */
+#define SSL3_S ""
+#endif /* !HAVE_SSLV3 */
+#ifdef HAVE_TLSV10
+#define TLS10_S "tls10 "
+#else /* !HAVE_TLSV10 */
+#define TLS10_S ""
+#endif /* !HAVE_TLSV10 */
+#ifdef HAVE_TLSV11
+#define TLS11_S "tls11 "
+#else /* !HAVE_TLSV11 */
+#define TLS11_S ""
+#endif /* !HAVE_TLSV11 */
+#ifdef HAVE_TLSV12
 #define TLS12_S "tls12 "
-#else /* !SSL_OP_NO_TLSv1_2 */
+#else /* !HAVE_TLSV12 */
 #define TLS12_S ""
-#endif /* !SSL_OP_NO_TLSv1_2 */
+#endif /* !HAVE_TLSV12 */
 #define SSL_PROTO_SUPPORT_S SSL2_S SSL3_S TLS10_S TLS11_S TLS12_S
 
 void ssl_openssl_version(void);
 int ssl_init(void) WUNRES;
 void ssl_reinit(void);
 void ssl_fini(void);
+
+char * ssl_sha1_to_str(unsigned char *, int) NONNULL(1) MALLOC;
 
 char * ssl_ssl_state_to_str(SSL *) NONNULL(1) MALLOC;
 
@@ -122,13 +156,15 @@ void ssl_dh_refcount_inc(DH *) NONNULL(1);
 #endif /* !OPENSSL_NO_DH */
 
 #ifndef OPENSSL_NO_EC
-#define SSL_EC_KEY_CURVE_DEFAULT "secp160r2"
 EC_KEY * ssl_ec_by_name(const char *) MALLOC;
 #endif /* !OPENSSL_NO_EC */
 
 EVP_PKEY * ssl_key_load(const char *) NONNULL(1) MALLOC;
 EVP_PKEY * ssl_key_genrsa(const int) MALLOC;
 void ssl_key_refcount_inc(EVP_PKEY *) NONNULL(1);
+#define SSL_KEY_IDSZ 20
+int ssl_key_identifier_sha1(EVP_PKEY *, unsigned char *) NONNULL(1,2);
+char * ssl_key_identifier(EVP_PKEY *, int) NONNULL(1) MALLOC;
 
 #ifndef OPENSSL_NO_TLSEXT
 int ssl_x509_v3ext_add(X509V3_CTX *, X509 *, char *, char *) NONNULL(1,2,3,4);
@@ -142,6 +178,7 @@ char * ssl_x509_subject(X509 *) NONNULL(1) MALLOC;
 char * ssl_x509_subject_cn(X509 *, size_t *) NONNULL(1,2) MALLOC;
 #define SSL_X509_FPRSZ 20
 int ssl_x509_fingerprint_sha1(X509 *, unsigned char *) NONNULL(1,2);
+char * ssl_x509_fingerprint(X509 *, int) NONNULL(1) MALLOC;
 char ** ssl_x509_names(X509 *) NONNULL(1) MALLOC;
 int ssl_x509_names_match(X509 *, const char *) NONNULL(1,2);
 char * ssl_x509_names_to_str(X509 *) NONNULL(1) MALLOC;
@@ -160,10 +197,9 @@ int ssl_session_is_valid(SSL_SESSION *) NONNULL(1);
 
 int ssl_is_ocspreq(const unsigned char *, size_t) NONNULL(1) WUNRES;
 
-#ifndef OPENSSL_NO_TLSEXT
-char * ssl_tls_clienthello_parse_sni(const unsigned char *, ssize_t *)
-       NONNULL(1,2) MALLOC;
-#endif /* !OPENSSL_NO_TLSEXT */
+int ssl_tls_clienthello_parse(const unsigned char *, ssize_t, int,
+                              const unsigned char **, char **)
+    NONNULL(1,4) WUNRES;
 int ssl_dnsname_match(const char *, size_t, const char *, size_t)
     NONNULL(1,3) WUNRES;
 char * ssl_wildcardify(const char *) NONNULL(1) MALLOC;

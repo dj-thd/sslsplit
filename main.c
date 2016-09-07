@@ -1,6 +1,6 @@
 /*
- * SSLsplit - transparent and scalable SSL/TLS interception
- * Copyright (c) 2009-2014, Daniel Roethlisberger <daniel@roe.ch>
+ * SSLsplit - transparent SSL/TLS interception
+ * Copyright (c) 2009-2016, Daniel Roethlisberger <daniel@roe.ch>
  * All rights reserved.
  * http://www.roe.ch/SSLsplit
  *
@@ -8,8 +8,7 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice unmodified, this list of conditions, and the following
- *    disclaimer.
+ *    notice, this list of conditions, and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
@@ -33,6 +32,7 @@
 
 #include "opts.h"
 #include "proxy.h"
+#include "privsep.h"
 #include "ssl.h"
 #include "nat.h"
 #include "proc.h"
@@ -40,6 +40,8 @@
 #include "sys.h"
 #include "log.h"
 #include "version.h"
+#include "defaults.h"
+#include "redis.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -61,6 +63,7 @@
 extern int daemon(int, int);
 #endif /* __APPLE__ */
 
+
 /*
  * Print version information to stderr.
  */
@@ -68,7 +71,30 @@ static void
 main_version(void)
 {
 	fprintf(stderr, "%s %s (built %s)\n", PNAME, version, build_date);
-	fprintf(stderr, "Copyright (c) 2009-2014, "
+	if (strlen(version) < 5) {
+		/*
+		 * Note to package maintainers:  If you break the version
+		 * string in your build, it will be impossible to provide
+		 * proper upstream support to the users of the package,
+		 * because it will be difficult or impossible to identify
+		 * the exact codebase that is being used by the user
+		 * reporting a bug.  The version string is provided through
+		 * different means depending on whether the code is a git
+		 * checkout, a tarball downloaded from GitHub or a release.
+		 * See GNUmakefile for the gory details.
+		 */
+		fprintf(stderr, "---------------------------------------"
+		                "---------------------------------------\n");
+		fprintf(stderr, "WARNING: Something is wrong with the "
+		                "version compiled into sslsplit!\n");
+		fprintf(stderr, "The version should contain a release "
+		                "number and/or a git commit reference.\n");
+		fprintf(stderr, "If using a package, please report a bug "
+		                "to the distro package maintainer.\n");
+		fprintf(stderr, "---------------------------------------"
+		                "---------------------------------------\n");
+	}
+	fprintf(stderr, "Copyright (c) 2009-2016, "
 	                "Daniel Roethlisberger <daniel@roe.ch>\n");
 	fprintf(stderr, "http://www.roe.ch/SSLsplit\n");
 	if (build_info[0]) {
@@ -114,6 +140,8 @@ main_usage(void)
 "  -K pemfile  use key from pemfile for leaf certs (default: generate)\n"
 "  -t certdir  use cert+chain+key PEM files from certdir to target all sites\n"
 "              matching the common names (non-matching: generate if CA)\n"
+"  -w gendir   write leaf key and only generated certificates to gendir\n"
+"  -W gendir   write leaf key and all certificates to gendir\n"
 "  -O          deny all OCSP requests on all proxyspecs\n"
 "  -P          passthrough SSL connections if they cannot be split because of\n"
 "              client cert auth or no matching cert and no CA (default: drop)\n"
@@ -124,7 +152,7 @@ main_usage(void)
 #define OPT_g 
 #endif /* !OPENSSL_NO_DH */
 #ifndef OPENSSL_NO_ECDH
-"  -G curve    use ECDH named curve (default: %s for non-RSA leafkey)\n"
+"  -G curve    use ECDH named curve (default: " DFLT_CURVE ")\n"
 #define OPT_G "G:"
 #else /* OPENSSL_NO_ECDH */
 #define OPT_G 
@@ -137,22 +165,26 @@ main_usage(void)
 #endif /* !SSL_OP_NO_COMPRESSION */
 "  -r proto    only support one of " SSL_PROTO_SUPPORT_S "(default: all)\n"
 "  -R proto    disable one of " SSL_PROTO_SUPPORT_S "(default: none)\n"
-"  -s ciphers  use the given OpenSSL cipher suite spec (default: ALL:-aNULL)\n"
+"  -s ciphers  use the given OpenSSL cipher suite spec (default: " DFLT_CIPHERS ")\n"
 "  -e engine   specify default NAT engine to use (default: %s)\n"
 "  -E          list available NAT engines and exit\n"
 "  -H address  connect to this Redis host and port (default: no cookie stripping)\n"
 "  -a auth     use specified Redis auth (default: empty = no auth)\n"
-"  -u user     drop privileges to user (default if run as root: nobody)\n"
+"  -u user     drop privileges to user (default if run as root: " DFLT_DROPUSER ")\n"
 "  -m group    when using -u, override group (default: primary group of user)\n"
-"  -j jaildir  chroot() to jaildir (impacts -S/-F and sni, see manual page)\n"
+"  -j jaildir  chroot() to jaildir (impacts sni proxyspecs, see manual page)\n"
 "  -p pidfile  write pid to pidfile (default: no pid file)\n"
 "  -l logfile  connect log: log one line summary per connection to logfile\n"
 "  -L logfile  content log: full data to file or named pipe (excludes -S/-F)\n"
 "  -S logdir   content log: full data to separate files in dir (excludes -L/-F)\n"
 "  -F pathspec content log: full data to sep files with %% subst (excl. -L/-S):\n"
 "              %%T - initial connection time as an ISO 8601 UTC timestamp\n"
-"              %%d - dest address:port\n"
-"              %%s - source address:port\n"
+"              %%d - destination host and port\n"
+"              %%D - destination host\n"
+"              %%p - destination port\n"
+"              %%s - source host and port\n"
+"              %%S - source host\n"
+"              %%q - source port\n"
 #ifdef HAVE_LOCAL_PROCINFO
 "              %%x - base name of local process        (requires -i)\n"
 "              %%X - full path to local process        (requires -i)\n"
@@ -178,13 +210,10 @@ main_usage(void)
 "              https 127.0.0.1 9443 sni 443     # https/4; SNI DNS lookups\n"
 "              tcp 127.0.0.1 10025              # tcp/4; default NAT engine\n"
 "              ssl 2001:db8::2 9999 pf          # ssl/6; NAT engine 'pf'\n"
+"              autossl ::1 10025                # autossl/6; STARTTLS et al\n"
 "Example:\n"
 "  %s -k ca.key -c ca.pem -P  https 127.0.0.1 8443  https ::1 8443\n"
-	"%s", BNAME,
-#ifndef OPENSSL_NO_ECDH
-	SSL_EC_KEY_CURVE_DEFAULT,
-#endif /* !OPENSSL_NO_ECDH */
-	dflt, BNAME, warn);
+	"%s", BNAME, dflt, BNAME, warn);
 }
 
 /*
@@ -202,14 +231,14 @@ main_loadtgcrt(const char *filename, void *arg)
 		log_err_printf("Failed to load cert and key from PEM file "
 		                "'%s'\n", filename);
 		log_fini();
-		exit(EXIT_FAILURE); /* XXX */
+		exit(EXIT_FAILURE);
 	}
 	if (X509_check_private_key(cert->crt, cert->key) != 1) {
 		log_err_printf("Cert does not match key in PEM file "
 		                "'%s':\n", filename);
 		ERR_print_errors_fp(stderr);
 		log_fini();
-		exit(EXIT_FAILURE); /* XXX */
+		exit(EXIT_FAILURE);
 	}
 
 #ifdef DEBUG_CERTIFICATE
@@ -276,8 +305,9 @@ main(int argc, char *argv[])
 		natengine = NULL;
 	}
 
-	while ((ch = getopt(argc, argv, OPT_g OPT_G OPT_Z OPT_i
-	                    "H:a:k:c:C:K:t:OPs:r:R:e:Eu:m:j:p:l:L:S:F:dDVh")) != -1) {
+	while ((ch = getopt(argc, argv, OPT_g OPT_G OPT_Z OPT_i "H:a:k:c:C:K:t:"
+	                    "OPs:r:R:e:Eu:m:j:p:l:L:S:F:dDVhW:w:")) != -1) {
+
 		switch (ch) {
 			case 'c':
 				if (opts->cacrt)
@@ -460,6 +490,12 @@ main(int argc, char *argv[])
 				exit(EXIT_SUCCESS);
 				break;
 			case 'u':
+				if (!sys_isuser(optarg)) {
+					fprintf(stderr, "%s: '%s' is not an "
+					                "existing user\n",
+					                argv0, optarg);
+					exit(EXIT_FAILURE);
+				}
 				if (opts->dropuser)
 					free(opts->dropuser);
 				opts->dropuser = strdup(optarg);
@@ -467,6 +503,12 @@ main(int argc, char *argv[])
 					oom_die(argv0);
 				break;
 			case 'm':
+				if (!sys_isgroup(optarg)) {
+					fprintf(stderr, "%s: '%s' is not an "
+					                "existing group\n",
+					                argv0, optarg);
+					exit(EXIT_FAILURE);
+				}
 				if (opts->dropgroup)
 					free(opts->dropgroup);
 				opts->dropgroup = strdup(optarg);
@@ -481,11 +523,23 @@ main(int argc, char *argv[])
 					oom_die(argv0);
 				break;
 			case 'j':
+				if (!sys_isdir(optarg)) {
+					fprintf(stderr, "%s: '%s' is not a "
+					                "directory\n",
+					                argv0, optarg);
+					exit(EXIT_FAILURE);
+				}
 				if (opts->jaildir)
 					free(opts->jaildir);
-				opts->jaildir = strdup(optarg);
-				if (!opts->jaildir)
-					oom_die(argv0);
+				opts->jaildir = realpath(optarg, NULL);
+				if (!opts->jaildir) {
+					fprintf(stderr, "%s: Failed to "
+					                "canonicalize '%s': "
+					                "%s (%i)\n",
+					                argv0, optarg,
+					                strerror(errno), errno);
+					exit(EXIT_FAILURE);
+				}
 				break;
 			case 'l':
 				if (opts->connectlog)
@@ -516,23 +570,113 @@ main(int argc, char *argv[])
 				opts->redis_auth = strdup(optarg);
 				break;
 			case 'S':
+				if (!sys_isdir(optarg)) {
+					fprintf(stderr, "%s: '%s' is not a "
+					                "directory\n",
+					                argv0, optarg);
+					exit(EXIT_FAILURE);
+				}
 				if (opts->contentlog)
 					free(opts->contentlog);
-				opts->contentlog = strdup(optarg);
-				if (!opts->contentlog)
-					oom_die(argv0);
+				opts->contentlog = realpath(optarg, NULL);
+				if (!opts->contentlog) {
+					fprintf(stderr, "%s: Failed to "
+					                "canonicalize '%s': "
+					                "%s (%i)\n",
+					                argv0, optarg,
+					                strerror(errno), errno);
+					exit(EXIT_FAILURE);
+				}
 				opts->contentlog_isdir = 1;
 				opts->contentlog_isspec = 0;
 				break;
-			case 'F':
+			case 'F': {
+				char *lhs, *rhs, *p, *q;
+				size_t n;
+				if (opts->contentlog_basedir)
+					free(opts->contentlog_basedir);
 				if (opts->contentlog)
 					free(opts->contentlog);
-				opts->contentlog = strdup(optarg);
-				if (!opts->contentlog)
+				if (log_content_split_pathspec(optarg, &lhs,
+				                               &rhs) == -1) {
+					fprintf(stderr, "%s: Failed to split "
+					                "'%s' in lhs/rhs: "
+					                "%s (%i)\n",
+					                argv0, optarg,
+					                strerror(errno), errno);
+					exit(EXIT_FAILURE);
+				}
+				/* eliminate %% from lhs */
+				for (p = q = lhs; *p; p++, q++) {
+					if (q < p)
+						*q = *p;
+					if (*p == '%' && *(p+1) == '%')
+						p++;
+				}
+				*q = '\0';
+				/* all %% in lhs resolved to % */
+				if (sys_mkpath(lhs, 0777) == -1) {
+					fprintf(stderr, "%s: Failed to create "
+					                "'%s': %s (%i)\n",
+					                argv0, lhs,
+					                strerror(errno), errno);
+					exit(EXIT_FAILURE);
+				}
+				opts->contentlog_basedir = realpath(lhs, NULL);
+				if (!opts->contentlog_basedir) {
+					fprintf(stderr, "%s: Failed to "
+					                "canonicalize '%s': "
+					                "%s (%i)\n",
+					                argv0, lhs,
+					                strerror(errno), errno);
+					exit(EXIT_FAILURE);
+				}
+				/* count '%' in opts->contentlog_basedir */
+				for (n = 0, p = opts->contentlog_basedir;
+				     *p;
+				     p++) {
+					if (*p == '%')
+						n++;
+				}
+				free(lhs);
+				n += strlen(opts->contentlog_basedir);
+				if (!(lhs = malloc(n + 1)))
+					oom_die(argv0);
+				/* re-encoding % to %%, copying basedir to lhs */
+				for (p = opts->contentlog_basedir, q = lhs;
+				     *p;
+				     p++, q++) {
+					*q = *p;
+					if (*q == '%')
+						*(++q) = '%';
+				}
+				*q = '\0';
+				/* lhs contains encoded realpathed basedir */
+				if (asprintf(&opts->contentlog,
+				             "%s/%s", lhs, rhs) < 0)
 					oom_die(argv0);
 				opts->contentlog_isdir = 0;
 				opts->contentlog_isspec = 1;
+				free(lhs);
+				free(rhs);
 				break;
+			case 'W':
+				opts->certgen_writeall = 1;
+				if (opts->certgendir)
+					free(opts->certgendir);
+				opts->certgendir = strdup(optarg);
+				if (!opts->certgendir)
+					oom_die(argv0);
+				break;
+			case 'w':
+				opts->certgen_writeall = 0;
+				if (opts->certgendir)
+					free(opts->certgendir);
+				opts->certgendir = strdup(optarg);
+				if (!opts->certgendir)
+					oom_die(argv0);
+				break;
+			}
 #ifdef HAVE_LOCAL_PROCINFO
 			case 'i':
 				opts->lprocinfo = 1;
@@ -592,6 +736,11 @@ main(int argc, char *argv[])
 		spec->natsocket = nat_getsocketcb(spec->natengine);
 	}
 	if (opts_has_ssl_spec(opts)) {
+		if (ssl_init() == -1) {
+			fprintf(stderr, "%s: failed to initialize OpenSSL.\n",
+			                argv0);
+			exit(EXIT_FAILURE);
+		}
 		if ((opts->cacrt || !opts->tgcrtdir) && !opts->cakey) {
 			fprintf(stderr, "%s: no CA key specified (-k).\n",
 			                argv0);
@@ -632,19 +781,19 @@ main(int argc, char *argv[])
 
 	/* dynamic defaults */
 	if (!opts->ciphers) {
-		opts->ciphers = strdup("ALL:-aNULL");
+		opts->ciphers = strdup(DFLT_CIPHERS);
 		if (!opts->ciphers)
 			oom_die(argv0);
 	}
 	if (!opts->dropuser && !geteuid() && !getuid() &&
-	    !opts->contentlog_isdir && !opts->contentlog_isspec) {
+	    sys_isuser(DFLT_DROPUSER)) {
 #ifdef __APPLE__
 		/* Apple broke ioctl(/dev/pf) for EUID != 0 so we do not
 		 * want to automatically drop privileges to nobody there
 		 * if pf has been used in any proxyspec */
 		if (!nat_used("pf")) {
 #endif /* __APPLE__ */
-		opts->dropuser = strdup("nobody");
+		opts->dropuser = strdup(DFLT_DROPUSER);
 		if (!opts->dropuser)
 			oom_die(argv0);
 #ifdef __APPLE__
@@ -652,6 +801,14 @@ main(int argc, char *argv[])
 #endif /* __APPLE__ */
 	}
 	if (opts_has_ssl_spec(opts) && opts->cakey && !opts->key) {
+		/*
+		 * While browsers still generally accept it, use a leaf key
+		 * size of 1024 bit for leaf keys.  When browsers start to
+		 * sunset 1024 bit RSA in leaf keys, we will need to make this
+		 * value bigger, and/or configurable.  Until then, users who
+		 * want a different size can always use their own pre-generated
+		 * leaf key instead of generating one.
+		 */
 		opts->key = ssl_key_genrsa(1024);
 		if (!opts->key) {
 			fprintf(stderr, "%s: error generating RSA key:\n",
@@ -662,6 +819,40 @@ main(int argc, char *argv[])
 		if (OPTS_DEBUG(opts)) {
 			log_dbg_printf("Generated RSA key for leaf certs.\n");
 		}
+	}
+
+	if (opts->certgendir) {
+		char *keyid, *keyfn;
+		int prv;
+		FILE *keyf;
+
+		keyid = ssl_key_identifier(opts->key, 0);
+		if (!keyid) {
+			fprintf(stderr, "%s: error generating key id\n", argv0);
+			exit(EXIT_FAILURE);
+		}
+
+		prv = asprintf(&keyfn, "%s/%s.key", opts->certgendir, keyid);
+		if (prv == -1) {
+			fprintf(stderr, "%s: %s (%i)\n", argv0,
+			                strerror(errno), errno);
+			exit(EXIT_FAILURE);
+		}
+
+		if (!(keyf = fopen(keyfn, "w"))) {
+			fprintf(stderr, "%s: Failed to open '%s' for writing: "
+			                "%s (%i)\n", argv0, keyfn,
+			                strerror(errno), errno);
+			exit(EXIT_FAILURE);
+		}
+		if (!PEM_write_PrivateKey(keyf, opts->key, NULL, 0, 0,
+		                                           NULL, NULL)) {
+			fprintf(stderr, "%s: Failed to write key to '%s': "
+			                "%s (%i)\n", argv0, keyfn,
+			                strerror(errno), errno);
+			exit(EXIT_FAILURE);
+		}
+		fclose(keyf);
 	}
 
 	/* usage checks after defaults */
@@ -681,32 +872,13 @@ main(int argc, char *argv[])
 		opts_proto_dbg_dump(opts);
 		log_dbg_printf("proxyspecs:\n");
 		for (proxyspec_t *spec = opts->spec; spec; spec = spec->next) {
-			char *lbuf, *cbuf = NULL;
-			lbuf = sys_sockaddr_str((struct sockaddr *)
-			                        &spec->listen_addr,
-			                        spec->listen_addrlen);
-			if (spec->connect_addrlen) {
-				cbuf = sys_sockaddr_str((struct sockaddr *)
-				                        &spec->connect_addr,
-				                        spec->connect_addrlen);
+			char *specstr = proxyspec_str(spec);
+			if (!specstr) {
+				fprintf(stderr, "%s: out of memory\n", argv0);
+				exit(EXIT_FAILURE);
 			}
-			if (spec->sni_port) {
-				if (asprintf(&cbuf, "sni %i",
-				             spec->sni_port) < 0) {
-					fprintf(stderr, "%s: out of memory\n",
-					                argv0);
-					exit(EXIT_FAILURE);
-				}
-			}
-			log_dbg_printf("- %s %s %s %s\n", lbuf,
-			               (spec->ssl ? "ssl" : "tcp"),
-			               (spec->http ? "http" : "plain"),
-			               (spec->natengine ? spec->natengine
-			                                : cbuf));
-			if (lbuf)
-				free(lbuf);
-			if (cbuf)
-				free(cbuf);
+			log_dbg_printf("- %s\n", specstr);
+			free(specstr);
 		}
 		if (opts->cacrt) {
 			char *subj = ssl_x509_subject(opts->cacrt);
@@ -751,47 +923,72 @@ main(int argc, char *argv[])
 		}
 	}
 
-	/* Bind listeners before dropping privileges */
-	proxy_ctx_t *proxy = proxy_new(opts);
-	if (!proxy) {
-		fprintf(stderr, "%s: failed to initialize proxy.\n", argv0);
-		exit(EXIT_FAILURE);
-	}
 	/* Load certs before dropping privs but after cachemgr_preinit() */
 	if (opts->tgcrtdir) {
 		sys_dir_eachfile(opts->tgcrtdir, main_loadtgcrt, opts);
 	}
 
-	/* Drop privs, chroot, detach from TTY */
-	if (sys_privdrop(opts->dropuser, opts->dropgroup, opts->jaildir) == -1) {
-		fprintf(stderr, "%s: failed to drop privileges: %s\n",
-		                argv0, strerror(errno));
-		exit(EXIT_FAILURE);
-	}
+	/* Detach from tty; from this point on, only canonicalized absolute
+	 * paths should be used (-j, -F, -S). */
 	if (opts->detach) {
 		if (OPTS_DEBUG(opts)) {
 			log_dbg_printf("Detaching from TTY, see syslog for "
 			               "errors after this point\n");
 		}
-		if (daemon(1, 0) == -1) {
+		if (daemon(0, 0) == -1) {
 			fprintf(stderr, "%s: failed to detach from TTY: %s\n",
 			                argv0, strerror(errno));
 			exit(EXIT_FAILURE);
 		}
 		log_err_mode(LOG_ERR_MODE_SYSLOG);
-		ssl_reinit();
 	}
 
+	if (opts->pidfile && (sys_pidf_write(pidfd) == -1)) {
+		log_err_printf("Failed to write PID to PID file '%s': %s (%i)"
+		               "\n", opts->pidfile, strerror(errno), errno);
+		return -1;
+	}
+
+	/* Fork into parent monitor process and (potentially unprivileged)
+	 * child process doing the actual work.  We request 3 privsep client
+	 * sockets: content logger thread, cert writer thread, and the child
+	 * process main thread (main proxy thread) */
+	int clisock[3];
+	if (privsep_fork(opts, clisock, 3) != 0) {
+		/* parent has exited the monitor loop after waiting for child,
+		 * or an error occured */
+		if (opts->pidfile) {
+			sys_pidf_close(pidfd, opts->pidfile);
+		}
+		goto out_parent;
+	}
+	/* child */
+
+	/* close pidfile in child */
+	if (opts->pidfile)
+		close(pidfd);
+
+	/* Initialize proxy before dropping privs */
+	proxy_ctx_t *proxy = proxy_new(opts, clisock[0]);
+	if (!proxy) {
+		log_err_printf("Failed to initialize proxy.\n");
+		exit(EXIT_FAILURE);
+	}
+
+	/* Drop privs, chroot */
+	if (sys_privdrop(opts->dropuser, opts->dropgroup,
+	                 opts->jaildir) == -1) {
+		log_err_printf("Failed to drop privileges: %s (%i)\n",
+		               strerror(errno), errno);
+		exit(EXIT_FAILURE);
+	}
+	ssl_reinit();
+
 	/* Post-privdrop/chroot/detach initialization, thread spawning */
-	if (log_init(opts) == -1) {
+	if (log_init(opts, proxy, clisock[1], clisock[2]) == -1) {
 		fprintf(stderr, "%s: failed to init log facility: %s\n",
 		                argv0, strerror(errno));
 		goto out_log_failed;
-	}
-	if (opts->pidfile && (sys_pidf_write(pidfd) == -1)) {
-		log_err_printf("Failed to write PID to PID file '%s': %s\n",
-		               opts->pidfile, strerror(errno));
-		goto out_pidwrite_failed;
 	}
 	if (cachemgr_init() == -1) {
 		log_err_printf("Failed to init cache manager.\n");
@@ -801,7 +998,6 @@ main(int argc, char *argv[])
 		log_err_printf("Failed to init NAT state table lookup.\n");
 		goto out_nat_failed;
 	}
-
 	rv = EXIT_SUCCESS;
 
 	proxy_run(proxy);
@@ -810,12 +1006,9 @@ main(int argc, char *argv[])
 out_nat_failed:
 	cachemgr_fini();
 out_cachemgr_failed:
-	if (opts->pidfile) {
-		sys_pidf_close(pidfd, opts->pidfile);
-	}
-out_pidwrite_failed:
 	log_fini();
 out_log_failed:
+out_parent:
 	opts_free(opts);
 	ssl_fini();
 	return rv;

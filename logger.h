@@ -1,6 +1,6 @@
 /*
- * SSLsplit - transparent and scalable SSL/TLS interception
- * Copyright (c) 2009-2014, Daniel Roethlisberger <daniel@roe.ch>
+ * SSLsplit - transparent SSL/TLS interception
+ * Copyright (c) 2009-2016, Daniel Roethlisberger <daniel@roe.ch>
  * All rights reserved.
  * http://www.roe.ch/SSLsplit
  *
@@ -8,8 +8,7 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice unmodified, this list of conditions, and the following
- *    disclaimer.
+ *    notice, this list of conditions, and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
@@ -35,20 +34,24 @@
 #include <unistd.h>
 #include <pthread.h>
 
+typedef int (*logger_reopen_func_t)(void);
 typedef int (*logger_open_func_t)(void *);
 typedef void (*logger_close_func_t)(void *);
 typedef ssize_t (*logger_write_func_t)(void *, const void *, size_t);
 typedef logbuf_t * (*logger_prep_func_t)(void *, unsigned long, logbuf_t *);
+typedef void (*logger_except_func_t)(void);
 typedef struct logger logger_t;
 
-logger_t * logger_new(logger_open_func_t, logger_close_func_t,
-                      logger_write_func_t, logger_prep_func_t)
-                      NONNULL(3) MALLOC;
+logger_t * logger_new(logger_reopen_func_t, logger_open_func_t,
+                      logger_close_func_t, logger_write_func_t,
+                      logger_prep_func_t, logger_except_func_t)
+                      NONNULL(4,6) MALLOC;
 void logger_free(logger_t *) NONNULL(1);
 int logger_start(logger_t *) NONNULL(1) WUNRES;
 void logger_leave(logger_t *) NONNULL(1);
 int logger_join(logger_t *) NONNULL(1);
 int logger_stop(logger_t *) NONNULL(1) WUNRES;
+int logger_reopen(logger_t *) NONNULL(1) WUNRES;
 int logger_open(logger_t *, void *) NONNULL(1,2) WUNRES;
 int logger_close(logger_t *, void *) NONNULL(1,2) WUNRES;
 int logger_submit(logger_t *, void *, unsigned long,

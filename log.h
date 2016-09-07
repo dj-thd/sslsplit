@@ -1,6 +1,6 @@
 /*
- * SSLsplit - transparent and scalable SSL/TLS interception
- * Copyright (c) 2009-2014, Daniel Roethlisberger <daniel@roe.ch>
+ * SSLsplit - transparent SSL/TLS interception
+ * Copyright (c) 2009-2016, Daniel Roethlisberger <daniel@roe.ch>
  * All rights reserved.
  * http://www.roe.ch/SSLsplit
  *
@@ -8,8 +8,7 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice unmodified, this list of conditions, and the following
- *    disclaimer.
+ *    notice, this list of conditions, and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
@@ -30,6 +29,7 @@
 #define LOG_H
 
 #include "opts.h"
+#include "proxy.h"
 #include "logger.h"
 #include "attrib.h"
 
@@ -58,15 +58,21 @@ extern logger_t *connect_log;
         logger_write_freebuf(connect_log, NULL, 0, (buf), (sz))
 
 typedef struct log_content_ctx log_content_ctx_t;
-int log_content_open(log_content_ctx_t **, opts_t *, char *, char *,
-                     char *, char *, char *) NONNULL(1,2,3) WUNRES;
+int log_content_open(log_content_ctx_t **, opts_t *, char *, char *, char *,
+                     char *, char *, char *, char *) NONNULL(1,2,3) WUNRES;
 int log_content_submit(log_content_ctx_t *, logbuf_t *, int)
                        NONNULL(1,2) WUNRES;
 int log_content_close(log_content_ctx_t **) NONNULL(1) WUNRES;
+int log_content_split_pathspec(const char *, char **,
+                               char **) NONNULL(1,2,3) WUNRES;
+
+int log_cert_submit(const char *, X509 *) NONNULL(1,2) WUNRES;
 
 int log_preinit(opts_t *) NONNULL(1) WUNRES;
-int log_init(opts_t *) NONNULL(1) WUNRES;
+void log_preinit_undo(void);
+int log_init(opts_t *, proxy_ctx_t *, int, int) NONNULL(1,2) WUNRES;
 void log_fini(void);
+int log_reopen(void) WUNRES;
 
 #endif /* !LOG_H */
 

@@ -1,6 +1,6 @@
 /*
- * SSLsplit - transparent and scalable SSL/TLS interception
- * Copyright (c) 2009-2014, Daniel Roethlisberger <daniel@roe.ch>
+ * SSLsplit - transparent SSL/TLS interception
+ * Copyright (c) 2009-2016, Daniel Roethlisberger <daniel@roe.ch>
  * All rights reserved.
  * http://www.roe.ch/SSLsplit
  *
@@ -8,8 +8,7 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice unmodified, this list of conditions, and the following
- *    disclaimer.
+ *    notice, this list of conditions, and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
@@ -53,6 +52,7 @@ typedef struct pxy_thr_ctx {
 
 struct pxy_thrmgr_ctx {
 	int num_thr;
+	opts_t *opts;
 	pxy_thr_ctx_t **thr;
 	pthread_mutex_t mutex;
 };
@@ -95,7 +95,7 @@ pxy_thrmgr_thr(void *arg)
  * This gets called before forking to background.
  */
 pxy_thrmgr_ctx_t *
-pxy_thrmgr_new(UNUSED opts_t *opts)
+pxy_thrmgr_new(opts_t *opts)
 {
 	pxy_thrmgr_ctx_t *ctx;
 
@@ -103,6 +103,7 @@ pxy_thrmgr_new(UNUSED opts_t *opts)
 		return NULL;
 	memset(ctx, 0, sizeof(pxy_thrmgr_ctx_t));
 
+	ctx->opts = opts;
 	ctx->num_thr = 2 * sys_get_cpu_cores();
 	return ctx;
 }
@@ -116,10 +117,9 @@ pxy_thrmgr_new(UNUSED opts_t *opts)
 int
 pxy_thrmgr_run(pxy_thrmgr_ctx_t *ctx)
 {
-	int idx = -1;
+	int idx = -1, dns = 0;
 
-	if (!ctx)
-		return -1;
+	dns = opts_has_dns_spec(ctx->opts);
 
 	pthread_mutex_init(&ctx->mutex, NULL);
 
@@ -140,11 +140,15 @@ pxy_thrmgr_run(pxy_thrmgr_ctx_t *ctx)
 			log_dbg_printf("Failed to create evbase %d\n", idx);
 			goto leave;
 		}
-		ctx->thr[idx]->dnsbase = evdns_base_new(
-		                         ctx->thr[idx]->evbase, 1);
-		if (!ctx->thr[idx]->dnsbase) {
-			log_dbg_printf("Failed to create dnsbase %d\n", idx);
-			goto leave;
+		if (dns) {
+			/* only create dns base if we actually need it later */
+			ctx->thr[idx]->dnsbase = evdns_base_new(
+			                         ctx->thr[idx]->evbase, 1);
+			if (!ctx->thr[idx]->dnsbase) {
+				log_dbg_printf("Failed to create dnsbase %d\n",
+				               idx);
+				goto leave;
+			}
 		}
 		ctx->thr[idx]->load = 0;
 		ctx->thr[idx]->running = 0;
@@ -203,8 +207,6 @@ leave:
 void
 pxy_thrmgr_free(pxy_thrmgr_ctx_t *ctx)
 {
-	if (!ctx)
-		return;
 	pthread_mutex_destroy(&ctx->mutex);
 	if (ctx->thr) {
 		for (int idx = 0; idx < ctx->num_thr; idx++) {
@@ -215,8 +217,12 @@ pxy_thrmgr_free(pxy_thrmgr_ctx_t *ctx)
 			pthread_join(ctx->thr[idx]->thr, NULL);
 		}
 		for (int idx = 0; idx < ctx->num_thr; idx++) {
-			evdns_base_free(ctx->thr[idx]->dnsbase, 0);
-			event_base_free(ctx->thr[idx]->evbase);
+			if (ctx->thr[idx]->dnsbase) {
+				evdns_base_free(ctx->thr[idx]->dnsbase, 0);
+			}
+			if (ctx->thr[idx]->evbase) {
+				event_base_free(ctx->thr[idx]->evbase);
+			}
 			free(ctx->thr[idx]);
 		}
 		free(ctx->thr);

@@ -1,6 +1,6 @@
 /*
- * SSLsplit - transparent and scalable SSL/TLS interception
- * Copyright (c) 2009-2014, Daniel Roethlisberger <daniel@roe.ch>
+ * SSLsplit - transparent SSL/TLS interception
+ * Copyright (c) 2009-2016, Daniel Roethlisberger <daniel@roe.ch>
  * All rights reserved.
  * http://www.roe.ch/SSLsplit
  *
@@ -8,8 +8,7 @@
  * modification, are permitted provided that the following conditions
  * are met:
  * 1. Redistributions of source code must retain the above copyright
- *    notice unmodified, this list of conditions, and the following
- *    disclaimer.
+ *    notice, this list of conditions, and the following disclaimer.
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
@@ -27,6 +26,8 @@
  */
 
 #include "sys.h"
+
+#include "defaults.h"
 
 #include <stdlib.h>
 #include <unistd.h>
@@ -61,7 +62,7 @@ sys_isdir_setup(void)
 		perror("asprintf");
 		exit(EXIT_FAILURE);
 	}
-	close(open(file, O_CREAT|O_WRONLY|O_APPEND, 0600));
+	close(open(file, O_CREAT|O_WRONLY|O_APPEND, DFLT_FILEMODE));
 	symlink(file, lfile);
 	mkdir(dir, 0700);
 	symlink(dir, ldir);
@@ -141,7 +142,7 @@ START_TEST(sys_mkpath_01)
 	         basedir);
 	fail_unless(!!dir, "asprintf failed");
 	fail_unless(!sys_isdir(dir), "dir already sys_isdir()");
-	fail_unless(!sys_mkpath(dir, 0755), "sys_mkpath failed");
+	fail_unless(!sys_mkpath(dir, DFLT_DIRMODE), "sys_mkpath failed");
 	fail_unless(sys_isdir(dir), "dir not sys_isdir()");
 	free(dir);
 }
@@ -204,6 +205,43 @@ START_TEST(sys_group_str_01)
 }
 END_TEST
 
+START_TEST(sys_ip46str_sanitize_01)
+{
+	char *clean;
+
+	clean = sys_ip46str_sanitize("2a01:7c8:aab0:1fb::1");
+	fail_unless(!!clean, "Sanitized string is NULL");
+	fail_unless(!strcmp(clean, "2a01_7c8_aab0_1fb__1"),
+	            "Unexpected result");
+	free(clean);
+}
+END_TEST
+
+START_TEST(sys_ip46str_sanitize_02)
+{
+	char *clean;
+
+	clean = sys_ip46str_sanitize("127.0.0.1");
+	fail_unless(!!clean, "Sanitized string is NULL");
+	fail_unless(!strcmp(clean, "127.0.0.1"),
+	            "Unexpected result");
+	free(clean);
+}
+END_TEST
+
+START_TEST(sys_ip46str_sanitize_03)
+{
+	char *clean;
+
+	clean = sys_ip46str_sanitize("fe80::5626:96ff:e4a7:f583%en0");
+	fail_unless(!!clean, "Sanitized string is NULL");
+	fail_unless(!strcmp(clean, "fe80__5626_96ff_e4a7_f583_en0"),
+	            "Unexpected result");
+	free(clean);
+}
+END_TEST
+
+
 Suite *
 sys_suite(void)
 {
@@ -244,6 +282,12 @@ sys_suite(void)
 
 	tc = tcase_create("sys_group_str");
 	tcase_add_test(tc, sys_group_str_01);
+	suite_add_tcase(s, tc);
+
+	tc = tcase_create("sys_ip46str_sanitize");
+	tcase_add_test(tc, sys_ip46str_sanitize_01);
+	tcase_add_test(tc, sys_ip46str_sanitize_02);
+	tcase_add_test(tc, sys_ip46str_sanitize_03);
 	suite_add_tcase(s, tc);
 
 	return s;

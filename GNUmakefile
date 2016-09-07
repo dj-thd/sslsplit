@@ -1,10 +1,45 @@
+### Variable overrides
+
+# You can change many aspects of the build behaviour without modifying this
+# make file simply by setting environment variables.
+#
+# Dependencies and features are auto-detected, but can be overridden:
+#
+# OPENSSL_BASE	Prefix of OpenSSL library and headers to build against
+# LIBEVENT_BASE	Prefix of libevent library and headers to build against
+# CHECK_BASE	Prefix of check library and headers to build against (optional)
+# PKGCONFIG	Name/path of pkg-config program to use for auto-detection
+# PCFLAGS	Additional pkg-config flags
+# XNU_VERSION	Version of included XNU headers to build against (OS X only)
+# FEATURES	Enable optional or force-enable undetected features (see below)
+#
+# Where and how to install to:
+#
+# PREFIX	Prefix to install under (default /usr/local)
+# DESTDIR	Destination root under which prefix is located (default /)
+# MANDIR	Subdir of PREFIX that contains man section dirs
+# INSTALLUID	UID to use for installed files
+# INSTALLGID	GID to use for installed files
+#
+# Standard compiler variables are respected, e.g.:
+#
+# CC		Compiler, e.g. for cross-compiling, ccache or ccc-analyzer
+# CFLAGS	Additional compiler flags, e.g. optimization flags
+# CPPFLAGS	Additional pre-processor flags
+# LDFLAGS	Additional linker flags
+# LIBS		Additional libraries to link against
+#
+# You can e.g. create a statically linked binary by running:
+# % PCFLAGS='--static' CFLAGS='-static' LDFLAGS='-static' make
+
+
 ### OpenSSL tweaking
 
 # Define to enable support for SSLv2.
-# Default since 0.4.9 is to disable SSLv2 entirely, since there are servers
-# that are not compatible with SSLv2 Client Hello messages.  If you build in
-# SSLv2 support, you can disable it at runtime using -R ssl2 to get the same
-# result as not building in SSLv2 support at all.
+# Default since 0.4.9 is to disable SSLv2 entirely even if OpenSSL supports it,
+# since there are servers that are not compatible with SSLv2 Client Hello
+# messages.  If you build in SSLv2 support, you can disable it at runtime using
+# -R ssl2 to get the same result as not building in SSLv2 support at all.
 #FEATURES+=	-DWITH_SSLV2
 
 # Define to make SSLsplit set a session id context in server mode.
@@ -29,8 +64,8 @@ DEBUG_CFLAGS?=	-g
 # Define to add SSL session cache debugging; dump all sessions in debug mode.
 #FEATURES+=	-DDEBUG_SESSION_CACHE
 
-# Define to add debugging of parsing the SNI from the SSL ClientHello.
-#FEATURES+=	-DDEBUG_SNI_PARSER
+# Define to add debugging of sslsplit's own ClientHello message parser.
+#FEATURES+=	-DDEBUG_CLIENTHELLO_PARSER
 
 # Define to add thread debugging; dump thread state when choosing a thread.
 #FEATURES+=	-DDEBUG_THREAD
@@ -47,8 +82,10 @@ DEBUG_CFLAGS?=	-g
 # are not available, try to look up a suitable XNU version that we have
 # headers for based on the OS X release reported by sw_vers.  Then as a last
 # resort, fall back to the latest version of XNU that we have headers for,
-# which may or may not work, depending on if there were significant changes
+# which may or may not work, depending on if there were API or ABI changes
 # in the DIOCNATLOOK ioctl interface to the NAT state table in the kernel.
+#
+# Note that you can override the XNU headers used by defining XNU_VERSION.
 
 ifeq ($(shell uname),Darwin)
 ifneq ($(wildcard /usr/include/libproc.h),)
@@ -59,7 +96,7 @@ OSX_VERSION?=	$(shell sw_vers -productVersion)
 XNU_METHOD=	uname
 XNU_HAVE:=	$(XNU_VERSION)
 ifeq ($(wildcard xnu/xnu-$(XNU_VERSION)),)
-XNU_VERSION=	$(shell awk '/\# $(OSX_VERSION)$$/ {print $$2}' xnu/GNUmakefile)
+XNU_VERSION=	$(shell awk '/^XNU_RELS.*\# $(OSX_VERSION)$$/ {print $$2}' xnu/GNUmakefile)
 XNU_METHOD=	sw_vers
 endif
 ifeq ($(wildcard xnu/xnu-$(XNU_VERSION)),)
@@ -104,11 +141,21 @@ endif
 PREFIX?=	/usr/local
 MANDIR?=	share/man
 
+INSTALLUID?=	0
+INSTALLGID?=	0
+BINUID?=	$(INSTALLUID)
+BINGID?=	$(INSTALLGID)
+BINMODE?=	0755
+MANUID?=	$(INSTALLUID)
+MANGID?=	$(INSTALLGID)
+MANMODE?=	0644
+
 OPENSSL?=	openssl
 PKGCONFIG?=	pkg-config
 
 BASENAME?=	basename
 CAT?=		cat
+CUT?=		cut
 GREP?=		grep
 INSTALL?=	install
 MKDIR?=		mkdir
@@ -154,7 +201,9 @@ ifndef GITDIR
 VERSION:=	$(shell $(BASENAME) $(PWD)|\
 			$(GREP) $(TARGET)-|\
 			$(SED) 's/.*$(TARGET)-\(.*\)/\1/g')
-BUILD_INFO+=	V:DIR
+NEWSSHA:=	$(shell $(OPENSSL) dgst -sha1 -r NEWS.md |\
+			$(CUT) -c -7)
+BUILD_INFO+=	V:DIR N:$(NEWSSHA)
 else
 VERSION:=	$(shell $(GIT) describe --tags --dirty --always)
 BUILD_INFO+=	V:GIT
@@ -166,18 +215,21 @@ BUILD_DATE:=	$(shell date +%Y-%m-%d)
 # Autodetect dependencies known to pkg-config
 PKGS:=		
 ifndef OPENSSL_BASE
-PKGS+=		$(shell $(PKGCONFIG) --exists openssl && echo openssl)
+PKGS+=		$(shell $(PKGCONFIG) $(PCFLAGS) --exists openssl \
+		&& echo openssl)
 endif
 ifndef LIBEVENT_BASE
-PKGS+=		$(shell $(PKGCONFIG) --exists libevent && echo libevent)
-PKGS+=		$(shell $(PKGCONFIG) --exists libevent_openssl \
+PKGS+=		$(shell $(PKGCONFIG) $(PCFLAGS) --exists libevent \
+		&& echo libevent)
+PKGS+=		$(shell $(PKGCONFIG) $(PCFLAGS) --exists libevent_openssl \
 		&& echo libevent_openssl)
-PKGS+=		$(shell $(PKGCONFIG) --exists libevent_pthreads \
+PKGS+=		$(shell $(PKGCONFIG) $(PCFLAGS) --exists libevent_pthreads \
 		&& echo libevent_pthreads)
 endif
 TPKGS:=		
 ifndef CHECK_BASE
-TPKGS+=		$(shell $(PKGCONFIG) --exists check && echo check)
+TPKGS+=		$(shell $(PKGCONFIG) $(PCFLAGS) --exists check \
+		&& echo check)
 endif
 
 # Include hiredis
@@ -194,7 +246,8 @@ OPENSSL_FIND:=	$(wildcard \
 		/usr/local/$(OPENSSL_PAT) \
 		/usr/$(OPENSSL_PAT))
 endif
-OPENSSL_FOUND:=	$(OPENSSL_FIND:/$(OPENSSL_PAT)=)
+OPENSSL_AVAIL:=	$(OPENSSL_FIND:/$(OPENSSL_PAT)=)
+OPENSSL_FOUND:=	$(word 1,$(OPENSSL_AVAIL))
 ifndef OPENSSL_FOUND
 $(error dependency 'OpenSSL' not found; \
 	install it or point OPENSSL_BASE to base path)
@@ -210,7 +263,8 @@ LIBEVENT_FIND:=	$(wildcard \
 		/usr/local/$(LIBEVENT_PAT) \
 		/usr/$(LIBEVENT_PAT))
 endif
-LIBEVENT_FOUND:=$(LIBEVENT_FIND:/$(LIBEVENT_PAT)=)
+LIBEVENT_AVAIL:=$(LIBEVENT_FIND:/$(LIBEVENT_PAT)=)
+LIBEVENT_FOUND:=$(word 1,$(LIBEVENT_AVAIL))
 ifndef LIBEVENT_FOUND
 $(error dependency 'libevent 2.x' not found; \
 	install it or point LIBEVENT_BASE to base path)
@@ -226,7 +280,8 @@ CHECK_FIND:=	$(wildcard \
 		/usr/local/$(CHECK_PAT) \
 		/usr/$(CHECK_PAT))
 endif
-CHECK_FOUND:=	$(CHECK_FIND:/$(CHECK_PAT)=)
+CHECK_AVAIL:=	$(CHECK_FIND:/$(CHECK_PAT)=)
+CHECK_FOUND:=	$(word 1,$(CHECK_AVAIL))
 ifndef CHECK_FOUND
 CHECK_MISSING:=	1
 endif
@@ -258,16 +313,18 @@ endif
 PKG_LIBS+=	-lhiredis
 
 ifneq (,$(strip $(PKGS)))
-PKG_CFLAGS+=	$(shell $(PKGCONFIG) --cflags-only-other $(PKGS))
-PKG_CPPFLAGS+=	$(shell $(PKGCONFIG) --cflags-only-I $(PKGS))
-PKG_LDFLAGS+=	$(shell $(PKGCONFIG) --libs-only-L --libs-only-other $(PKGS))
-PKG_LIBS+=	$(shell $(PKGCONFIG) --libs-only-l $(PKGS))
+PKG_CFLAGS+=	$(shell $(PKGCONFIG) $(PCFLAGS) --cflags-only-other $(PKGS))
+PKG_CPPFLAGS+=	$(shell $(PKGCONFIG) $(PCFLAGS) --cflags-only-I $(PKGS))
+PKG_LDFLAGS+=	$(shell $(PKGCONFIG) $(PCFLAGS) --libs-only-L \
+		--libs-only-other $(PKGS))
+PKG_LIBS+=	$(shell $(PKGCONFIG) $(PCFLAGS) --libs-only-l $(PKGS))
 endif
 ifneq (,$(strip $(TPKGS)))
-TPKG_CFLAGS+=	$(shell $(PKGCONFIG) --cflags-only-other $(TPKGS))
-TPKG_CPPFLAGS+=	$(shell $(PKGCONFIG) --cflags-only-I $(TPKGS))
-TPKG_LDFLAGS+=	$(shell $(PKGCONFIG) --libs-only-L --libs-only-other $(TPKGS))
-TPKG_LIBS+=	$(shell $(PKGCONFIG) --libs-only-l $(TPKGS))
+TPKG_CFLAGS+=	$(shell $(PKGCONFIG) $(PCFLAGS) --cflags-only-other $(TPKGS))
+TPKG_CPPFLAGS+=	$(shell $(PKGCONFIG) $(PCFLAGS) --cflags-only-I $(TPKGS))
+TPKG_LDFLAGS+=	$(shell $(PKGCONFIG) $(PCFLAGS) --libs-only-L \
+		--libs-only-other $(TPKGS))
+TPKG_LIBS+=	$(shell $(PKGCONFIG) $(PCFLAGS) --libs-only-l $(TPKGS))
 endif
 
 CPPDEFS+=	-D_GNU_SOURCE \
@@ -300,27 +357,34 @@ export OPENSSL
 export MKDIR
 export WGET
 
-all: version config $(TARGET)
-
-version:
-	@echo "$(PNAME) $(VERSION)"
-
-config:
-	@echo "via pkg-config: $(strip $(PKGS) $(TPKGS))"
+ifndef MAKE_RESTARTS
+$(info ------------------------------------------------------------------------------)
+$(info $(PNAME) $(VERSION))
+$(info ------------------------------------------------------------------------------)
+$(info Report bugs at https://github.com/droe/sslsplit/issues/new)
+$(info Before reporting bugs, make sure to try the latest develop branch first:)
+$(info % git clone -b develop https://github.com/droe/sslsplit.git)
+$(info ------------------------------------------------------------------------------)
+$(info Via pkg-config: $(strip $(PKGS) $(TPKGS)))
 ifdef OPENSSL_FOUND
-	@echo "OPENSSL_BASE:   $(strip $(OPENSSL_FOUND))"
+$(info OPENSSL_BASE:   $(strip $(OPENSSL_FOUND)))
 endif
 ifdef LIBEVENT_FOUND
-	@echo "LIBEVENT_BASE:  $(strip $(LIBEVENT_FOUND))"
+$(info LIBEVENT_BASE:  $(strip $(LIBEVENT_FOUND)))
 endif
 ifdef CHECK_FOUND
-	@echo "CHECK_BASE:     $(strip $(CHECK_FOUND))"
+$(info CHECK_BASE:     $(strip $(CHECK_FOUND)))
 endif
-	@echo "Build options:  $(FEATURES)"
+$(info Build options:  $(FEATURES))
 ifeq ($(shell uname),Darwin)
-	@echo "OSX_VERSION:    $(OSX_VERSION)"
-	@echo "XNU_VERSION:    $(XNU_VERSION) ($(XNU_METHOD), have $(XNU_HAVE))"
+$(info OSX_VERSION:    $(OSX_VERSION))
+$(info XNU_VERSION:    $(XNU_VERSION) ($(XNU_METHOD), have $(XNU_HAVE)))
 endif
+$(info uname -a:       $(shell uname -a))
+$(info ------------------------------------------------------------------------------)
+endif
+
+all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
@@ -337,6 +401,9 @@ endif
 
 %.o: %.c $(HDRS) GNUmakefile
 	$(CC) -c $(CPPFLAGS) $(CFLAGS) -o $@ $<
+
+travis: TCPPFLAGS+=-DTRAVIS
+travis: test
 
 test: TCPPFLAGS+=-D"TEST_ZEROUSR=\"$(shell id -u -n root||echo 0)\""
 test: TCPPFLAGS+=-D"TEST_ZEROGRP=\"$(shell id -g -n root||echo 0)\""
@@ -356,8 +423,10 @@ install: $(TARGET)
 	test -d $(DESTDIR)$(PREFIX)/bin || $(MKDIR) -p $(DESTDIR)$(PREFIX)/bin
 	test -d $(DESTDIR)$(PREFIX)/$(MANDIR)/man1 || \
 		$(MKDIR) -p $(DESTDIR)$(PREFIX)/$(MANDIR)/man1
-	$(INSTALL) -o 0 -g 0 -m 0755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/
-	$(INSTALL) -o 0 -g 0 -m 0644 $(TARGET).1 $(DESTDIR)$(PREFIX)/$(MANDIR)/man1/
+	$(INSTALL) -o $(BINUID) -g $(BINGID) -m $(BINMODE) \
+		$(TARGET) $(DESTDIR)$(PREFIX)/bin/
+	$(INSTALL) -o $(MANUID) -g $(MANGID) -m $(MANMODE) \
+		$(TARGET).1 $(DESTDIR)$(PREFIX)/$(MANDIR)/man1/
 
 deinstall:
 	$(RM) -f $(DESTDIR)$(PREFIX)/bin/$(TARGET) $(DESTDIR)$(PREFIX)/$(MANDIR)/man1/$(TARGET).1
