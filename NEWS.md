@@ -1,6 +1,8 @@
 
 ### SSLsplit develop
 
+-   No longer assume an out of memory condition when a certificate contains
+    neither a CN nor a subjectAltName extension.
 -   Extend -L content logging with EOF message to allow log parsers to figure
     out when a connection ends (issue #128 by @mattes).  Note that log parsers
     need to be adjusted to handle the new EOF message.
@@ -15,7 +17,7 @@
 -   Fix parallel make build (-j) for the test target (issue #140).
 -   Do not set owner and group if install target is called by unprivileged
     user (pull req #141 by @cgroschupp).
--   Add XNU headers for Mac OS X 10.11.3, 10.11.4 and 10.11.5.
+-   Add XNU headers for Mac OS X 10.11.3, 10.11.4, 10.11.5, 10.11.6 and 10.12.
 -   Minor bugfixes and improvements.
 
 

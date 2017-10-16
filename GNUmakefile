@@ -363,6 +363,11 @@ CFLAGS+=	-pthread
 LDFLAGS+=	-pthread
 endif
 
+# _FORTIFY_SOURCE requires -O on Linux
+ifeq (,$(findstring -O,$(CFLAGS)))
+CFLAGS+=	-O
+endif
+
 export VERSION
 export OPENSSL
 export MKDIR
