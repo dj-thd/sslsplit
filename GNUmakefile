@@ -18,8 +18,8 @@
 # PREFIX	Prefix to install under (default /usr/local)
 # DESTDIR	Destination root under which prefix is located (default /)
 # MANDIR	Subdir of PREFIX that contains man section dirs
-# INSTALLUID	UID to use for installed files
-# INSTALLGID	GID to use for installed files
+# INSTALLUID	UID to use for installed files if installing as root
+# INSTALLGID	GID to use for installed files if installing as root
 #
 # Standard compiler variables are respected, e.g.:
 #
@@ -69,6 +69,9 @@ DEBUG_CFLAGS?=	-g
 
 # Define to add thread debugging; dump thread state when choosing a thread.
 #FEATURES+=	-DDEBUG_THREAD
+
+# Define to add privilege separation server event loop debugging.
+#FEATURES+=	-DDEBUG_PRIVSEP_SERVER
 
 # When debugging OpenSSL related issues, make sure you use a debug build of
 # OpenSSL and consider enabling its debugging options -DREF_PRINT -DREF_CHECK
@@ -149,12 +152,20 @@ BINMODE?=	0755
 MANUID?=	$(INSTALLUID)
 MANGID?=	$(INSTALLGID)
 MANMODE?=	0644
+ifeq ($(shell id -u),0)
+BINOWNERFLAGS?=	-o $(BINUID) -g $(BINGID)
+MANOWNERFLAGS?=	-o $(MANUID) -g $(MANGID)
+else
+BINOWNERFLAGS?=	
+MANOWNERFLAGS?=	
+endif
 
 OPENSSL?=	openssl
 PKGCONFIG?=	pkg-config
 
 BASENAME?=	basename
 CAT?=		cat
+CHECKNR?=	checknr
 CUT?=		cut
 GREP?=		grep
 INSTALL?=	install
@@ -423,9 +434,9 @@ install: $(TARGET)
 	test -d $(DESTDIR)$(PREFIX)/bin || $(MKDIR) -p $(DESTDIR)$(PREFIX)/bin
 	test -d $(DESTDIR)$(PREFIX)/$(MANDIR)/man1 || \
 		$(MKDIR) -p $(DESTDIR)$(PREFIX)/$(MANDIR)/man1
-	$(INSTALL) -o $(BINUID) -g $(BINGID) -m $(BINMODE) \
+	$(INSTALL) $(BINOWNERFLAGS) -m $(BINMODE) \
 		$(TARGET) $(DESTDIR)$(PREFIX)/bin/
-	$(INSTALL) -o $(MANUID) -g $(MANGID) -m $(MANMODE) \
+	$(INSTALL) $(MANOWNERFLAGS) -m $(MANMODE) \
 		$(TARGET).1 $(DESTDIR)$(PREFIX)/$(MANDIR)/man1/
 
 deinstall:
@@ -435,7 +446,10 @@ ifdef GITDIR
 lint:
 	$(CPPCHECK) $(CPPCHECKFLAGS) --force --enable=all --error-exitcode=1 .
 
-mantest:
+manlint: $(TARGET).1
+	$(CHECKNR) $(TARGET).1
+
+mantest: $(TARGET).1
 	$(RM) -f man1
 	$(LN) -sf . man1
 	$(MAN) -M . 1 $(TARGET)
@@ -487,6 +501,6 @@ endif
 
 FORCE:
 
-.PHONY: all config clean test lint install deinstall \
+.PHONY: all config clean test travis lint install deinstall manlint \
         mantest man manclean fetchdeps dist disttest distclean realclean
 

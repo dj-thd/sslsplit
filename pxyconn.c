@@ -120,16 +120,19 @@ typedef struct pxy_conn_ctx {
 	struct pxy_conn_desc dst;
 
 	/* status flags */
+	unsigned int connected : 1;       /* 0 until both ends are connected */
+	unsigned int enomem : 1;                       /* 1 if out of memory */
+	/* ssl */
+	unsigned int sni_peek_retries : 6;       /* max 64 SNI parse retries */
 	unsigned int immutable_cert : 1;  /* 1 if the cert cannot be changed */
 	unsigned int generated_cert : 1;     /* 1 if we generated a new cert */
-	unsigned int connected : 1;       /* 0 until both ends are connected */
+	unsigned int passthrough : 1;      /* 1 if SSL passthrough is active */
+	/* http */
 	unsigned int seen_req_header : 1; /* 0 until request header complete */
 	unsigned int seen_resp_header : 1;  /* 0 until response hdr complete */
 	unsigned int sent_http_conn_close : 1;   /* 0 until Conn: close sent */
-	unsigned int passthrough : 1;      /* 1 if SSL passthrough is active */
 	unsigned int ocsp_denied : 1;                /* 1 if OCSP was denied */
-	unsigned int enomem : 1;                       /* 1 if out of memory */
-	unsigned int sni_peek_retries : 6;       /* max 64 SNI parse retries */
+	/* autossl */
 	unsigned int clienthello_search : 1;       /* 1 if waiting for hello */
 	unsigned int clienthello_found : 1;      /* 1 if conn upgrade to SSL */
 
@@ -220,7 +223,7 @@ pxy_conn_ctx_new(proxyspec_t *spec, opts_t *opts,
 }
 
 static void NONNULL(1)
-pxy_conn_ctx_free(pxy_conn_ctx_t *ctx)
+pxy_conn_ctx_free(pxy_conn_ctx_t *ctx, int by_requestor)
 {
 #ifdef DEBUG_PROXY
 	if (OPTS_DEBUG(ctx->opts)) {
@@ -228,6 +231,11 @@ pxy_conn_ctx_free(pxy_conn_ctx_t *ctx)
 		                (void*)ctx);
 	}
 #endif /* DEBUG_PROXY */
+	if (WANT_CONTENT_LOG(ctx) && ctx->logctx) {
+		if (log_content_close(&ctx->logctx, by_requestor) == -1) {
+			log_err_printf("Warning: Content log close failed\n");
+		}
+	}
 	pxy_thrmgr_detach(ctx->thrmgr, ctx->thridx);
 	if (ctx->srchost_str) {
 		free(ctx->srchost_str);
@@ -293,11 +301,6 @@ pxy_conn_ctx_free(pxy_conn_ctx_t *ctx)
 	}
 	if (ctx->sni) {
 		free(ctx->sni);
-	}
-	if (WANT_CONTENT_LOG(ctx) && ctx->logctx) {
-		if (log_content_close(&ctx->logctx) == -1) {
-			log_err_printf("Warning: Content log close failed\n");
-		}
 	}
 	free(ctx);
 }
@@ -580,7 +583,14 @@ pxy_ossl_sessnew_cb(MAYBE_UNUSED SSL *ssl, SSL_SESSION *sess)
 	}
 #endif /* HAVE_SSLV2 */
 	if (sess) {
-		cachemgr_ssess_set(sess);
+		
+		/* cachemgr_ssess_set(sess);
+         * Macro deprecated in 1.1
+		*/
+
+		unsigned int sess_length = 0;
+		cache_set(cachemgr_ssess, cachessess_mkkey(SSL_SESSION_get0_id_context(sess, &sess_length), sess_length), cachessess_mkval(sess));
+	
 	}
 	return 0;
 }
@@ -602,7 +612,12 @@ pxy_ossl_sessremove_cb(UNUSED SSL_CTX *sslctx, SSL_SESSION *sess)
 	}
 #endif /* DEBUG_SESSION_CACHE */
 	if (sess) {
-		cachemgr_ssess_del(sess);
+		
+		/* cachemgr_ssess_del(sess);
+         * Function deprecated in 1.1
+		*/
+		unsigned int sess_length = 0;
+		cache_del(cachemgr_ssess, cachessess_mkkey(SSL_SESSION_get0_id_context(sess, &sess_length), sess_length));
 	}
 }
 
@@ -1137,7 +1152,7 @@ bufferevent_free_and_close_fd(struct bufferevent *bev, pxy_conn_ctx_t *ctx)
 	evutil_socket_t fd = bufferevent_getfd(bev);
 	SSL *ssl = NULL;
 
-	if (ctx->spec->ssl && !ctx->passthrough) {
+	if ((ctx->spec->ssl || ctx->clienthello_found) && !ctx->passthrough) {
 		ssl = bufferevent_openssl_get_ssl(bev); /* does not inc refc */
 	}
 
@@ -1636,17 +1651,19 @@ pxy_conn_autossl_peek_and_upgrade(pxy_conn_ctx_t *ctx)
 			}
 			ctx->dst.bev = bufferevent_openssl_filter_new(
 			               ctx->evbase, ctx->dst.bev, ctx->dst.ssl,
-			               BUFFEREVENT_SSL_CONNECTING, 0);
+			               BUFFEREVENT_SSL_CONNECTING,
+			               BEV_OPT_DEFER_CALLBACKS);
 			bufferevent_setcb(ctx->dst.bev, pxy_bev_readcb,
 			                  pxy_bev_writecb, pxy_bev_eventcb,
 			                  ctx);
 			bufferevent_enable(ctx->dst.bev, EV_READ|EV_WRITE);
-			if(!ctx->dst.bev) {
+			if (!ctx->dst.bev) {
 				return 0;
 			}
-			if( OPTS_DEBUG(ctx->opts)) {
+			if (OPTS_DEBUG(ctx->opts)) {
 				log_err_printf("Replaced dst bufferevent, new "
-				               "one is %p\n", (void*)ctx->dst.bev);
+				               "one is %p\n",
+				               (void*)ctx->dst.bev);
 			}
 			ctx->clienthello_search = 0;
 			ctx->clienthello_found = 1;
@@ -1661,8 +1678,8 @@ pxy_conn_autossl_peek_and_upgrade(pxy_conn_ctx_t *ctx)
 	return 0;
 }
 
-void
-pxy_conn_terminate_free(pxy_conn_ctx_t *ctx)
+static void
+pxy_conn_terminate_free(pxy_conn_ctx_t *ctx, int is_requestor)
 {
 	log_err_printf("Terminating connection%s!\n",
 	               ctx->enomem ? " (out of memory)" : "");
@@ -1674,7 +1691,7 @@ pxy_conn_terminate_free(pxy_conn_ctx_t *ctx)
 		bufferevent_free_and_close_fd(ctx->src.bev, ctx);
 		ctx->src.bev = NULL;
 	}
-	pxy_conn_ctx_free(ctx);
+	pxy_conn_ctx_free(ctx, is_requestor);
 }
 
 /*
@@ -1697,9 +1714,8 @@ pxy_bev_readcb(struct bufferevent *bev, void *arg)
 	if (!ctx->connected) {
 		log_err_printf("readcb called when other end not connected - "
 		               "aborting.\n");
-		/* XXX should signal main loop instead of calling exit() */
-		log_fini();
-		exit(EXIT_FAILURE);
+		log_exceptcb();
+		return;
 	}
 
 	if (ctx->clienthello_search) {
@@ -1710,6 +1726,8 @@ pxy_bev_readcb(struct bufferevent *bev, void *arg)
 
 	struct evbuffer *inbuf = bufferevent_get_input(bev);
 	if (other->closed) {
+		log_dbg_printf("Warning: Drained %zu bytes (conn closed)\n",
+		               evbuffer_get_length(inbuf));
 		evbuffer_drain(inbuf, evbuffer_get_length(inbuf));
 		return;
 	}
@@ -1815,7 +1833,7 @@ pxy_bev_readcb(struct bufferevent *bev, void *arg)
 
 	/* out of memory condition? */
 	if (ctx->enomem) {
-		pxy_conn_terminate_free(ctx);
+		pxy_conn_terminate_free(ctx, (bev == ctx->src.bev));
 		return;
 	}
 
@@ -1869,7 +1887,7 @@ pxy_bev_writecb(struct bufferevent *bev, void *arg)
 			/* finished writing and other end is closed;
 			 * close this end too and clean up memory */
 			bufferevent_free_and_close_fd(bev, ctx);
-			pxy_conn_ctx_free(ctx);
+			pxy_conn_ctx_free(ctx, (bev == ctx->dst.bev));
 		}
 		return;
 	}
@@ -1892,6 +1910,7 @@ pxy_bev_eventcb(struct bufferevent *bev, short events, void *arg)
 	pxy_conn_ctx_t *ctx = arg;
 	pxy_conn_desc_t *this = (bev==ctx->src.bev) ? &ctx->src : &ctx->dst;
 	pxy_conn_desc_t *other = (bev==ctx->src.bev) ? &ctx->dst : &ctx->src;
+	int is_requestor = (bev == ctx->src.bev);
 
 #ifdef DEBUG_PROXY
 	if (OPTS_DEBUG(ctx->opts)) {
@@ -1936,7 +1955,7 @@ pxy_bev_eventcb(struct bufferevent *bev, short events, void *arg)
 					return;
 				}
 				evutil_closesocket(ctx->fd);
-				pxy_conn_ctx_free(ctx);
+				pxy_conn_ctx_free(ctx, 1);
 				return;
 			}
 		}
@@ -1963,7 +1982,7 @@ pxy_bev_eventcb(struct bufferevent *bev, short events, void *arg)
 			}
 			bufferevent_free_and_close_fd(bev, ctx);
 			evutil_closesocket(ctx->fd);
-			pxy_conn_ctx_free(ctx);
+			pxy_conn_ctx_free(ctx, 1);
 			return;
 		}
 
@@ -1974,7 +1993,7 @@ pxy_bev_eventcb(struct bufferevent *bev, short events, void *arg)
 			                     &ctx->dsthost_str,
 			                     &ctx->dstport_str) != 0) {
 				ctx->enomem = 1;
-				pxy_conn_terminate_free(ctx);
+				pxy_conn_terminate_free(ctx, 1);
 				return;
 			}
 
@@ -1997,7 +2016,7 @@ pxy_bev_eventcb(struct bufferevent *bev, short events, void *arg)
 					if (!ctx->lproc.user ||
 					    !ctx->lproc.group) {
 						ctx->enomem = 1;
-						pxy_conn_terminate_free(ctx);
+						pxy_conn_terminate_free(ctx, 1);
 						return;
 					}
 				}
@@ -2018,7 +2037,7 @@ pxy_bev_eventcb(struct bufferevent *bev, short events, void *arg)
 			                    ) == -1) {
 				if (errno == ENOMEM)
 					ctx->enomem = 1;
-				pxy_conn_terminate_free(ctx);
+				pxy_conn_terminate_free(ctx, 1);
 				return;
 			}
 		}
@@ -2095,8 +2114,9 @@ connected:
 		           SSL_R_SSLV3_ALERT_HANDSHAKE_FAILURE) {
 			/* these can happen due to client cert auth,
 			 * only log error if debugging is activated */
-			log_dbg_printf("Error from bufferevent: "
+			log_dbg_printf("Error from %s bufferevent: "
 			               "%i:%s %lu:%i:%s:%i:%s:%i:%s\n",
+			               (bev == ctx->src.bev) ? "src" : "dst",
 			               errno,
 			               errno ? strerror(errno) : "-",
 			               sslerr,
@@ -2122,8 +2142,9 @@ connected:
 			}
 		} else {
 			/* real errors */
-			log_err_printf("Error from bufferevent: "
+			log_err_printf("Error from %s bufferevent: "
 			               "%i:%s %lu:%i:%s:%i:%s:%i:%s\n",
+			               (bev == ctx->src.bev) ? "src" : "dst",
 			               errno,
 			               errno ? strerror(errno) : "-",
 			               sslerr,
@@ -2184,28 +2205,41 @@ connected:
 	}
 
 	if (events & BEV_EVENT_EOF) {
+#ifdef DEBUG_PROXY
+		if (OPTS_DEBUG(ctx->opts)) {
+			log_dbg_printf("evbuffer size at EOF: "
+			               "i:%zu o:%zu i:%zu o:%zu\n",
+			                evbuffer_get_length(
+			                    bufferevent_get_input(bev)),
+			                evbuffer_get_length(
+			                    bufferevent_get_output(bev)),
+			                evbuffer_get_length(
+			                    bufferevent_get_input(other->bev)),
+			                evbuffer_get_length(
+			                    bufferevent_get_output(other->bev))
+			                );
+		}
+#endif /* DEBUG_PROXY */
 		if (!ctx->connected) {
-			log_dbg_printf("EOF on inbound connection while "
-			               "connecting to original destination\n");
+			log_dbg_printf("EOF on outbound connection before "
+			               "connection establishment\n");
 			evutil_closesocket(ctx->fd);
 			other->closed = 1;
 		} else if (!other->closed) {
-			struct evbuffer *inbuf, *outbuf;
-			inbuf = bufferevent_get_input(bev);
-			outbuf = bufferevent_get_output(other->bev);
-			if (evbuffer_get_length(inbuf) > 0) {
-				evbuffer_add_buffer(outbuf, inbuf);
-			} else {
-				/* if the other end is still open and doesn't
-				 * have data to send, close it, otherwise its
-				 * writecb will close it after writing what's
-				 * left in the output buffer. */
-				if (evbuffer_get_length(outbuf) == 0) {
-					bufferevent_free_and_close_fd(
-							other->bev, ctx);
-					other->bev = NULL;
-					other->closed = 1;
-				}
+			/* if there is data pending in the closed connection,
+			 * handle it here, otherwise it will be lost. */
+			if (evbuffer_get_length(bufferevent_get_input(bev))) {
+				pxy_bev_readcb(bev, ctx);
+			}
+			/* if the other end is still open and doesn't
+			 * have data to send, close it, otherwise its
+			 * writecb will close it after writing what's
+			 * left in the output buffer. */
+			if (evbuffer_get_length(
+			    bufferevent_get_output(other->bev)) == 0) {
+				bufferevent_free_and_close_fd(other->bev, ctx);
+				other->bev = NULL;
+				other->closed = 1;
 			}
 		}
 		goto leave;
@@ -2229,7 +2263,7 @@ leave:
 	bufferevent_free_and_close_fd(bev, ctx);
 	this->bev = NULL;
 	if (other->closed) {
-		pxy_conn_ctx_free(ctx);
+		pxy_conn_ctx_free(ctx, is_requestor);
 	}
 }
 
@@ -2243,7 +2277,7 @@ pxy_conn_connect(pxy_conn_ctx_t *ctx)
 	if (!ctx->addrlen) {
 		log_err_printf("No target address; aborting connection\n");
 		evutil_closesocket(ctx->fd);
-		pxy_conn_ctx_free(ctx);
+		pxy_conn_ctx_free(ctx, 1);
 		return;
 	}
 
@@ -2253,7 +2287,7 @@ pxy_conn_connect(pxy_conn_ctx_t *ctx)
 		if (!ctx->dst.ssl) {
 			log_err_printf("Error creating SSL\n");
 			evutil_closesocket(ctx->fd);
-			pxy_conn_ctx_free(ctx);
+			pxy_conn_ctx_free(ctx, 1);
 			return;
 		}
 	}
@@ -2264,7 +2298,7 @@ pxy_conn_connect(pxy_conn_ctx_t *ctx)
 			ctx->dst.ssl = NULL;
 		}
 		evutil_closesocket(ctx->fd);
-		pxy_conn_ctx_free(ctx);
+		pxy_conn_ctx_free(ctx, 1);
 		return;
 	}
 
@@ -2300,7 +2334,7 @@ pxy_sni_resolve_cb(int errcode, struct evutil_addrinfo *ai, void *arg)
 		log_err_printf("Cannot resolve SNI hostname '%s': %s\n",
 		               ctx->sni, evutil_gai_strerror(errcode));
 		evutil_closesocket(ctx->fd);
-		pxy_conn_ctx_free(ctx);
+		pxy_conn_ctx_free(ctx, 1);
 		return;
 	}
 
@@ -2341,13 +2375,13 @@ pxy_fd_readcb(MAYBE_UNUSED evutil_socket_t fd, UNUSED short what, void *arg)
 			log_err_printf("Error peeking on fd, aborting "
 			               "connection\n");
 			evutil_closesocket(fd);
-			pxy_conn_ctx_free(ctx);
+			pxy_conn_ctx_free(ctx, 1);
 			return;
 		}
 		if (n == 0) {
 			/* socket got closed while we were waiting */
 			evutil_closesocket(fd);
-			pxy_conn_ctx_free(ctx);
+			pxy_conn_ctx_free(ctx, 1);
 			return;
 		}
 
@@ -2357,7 +2391,7 @@ pxy_fd_readcb(MAYBE_UNUSED evutil_socket_t fd, UNUSED short what, void *arg)
 			               "ClientHello message, "
 			               "aborting connection\n");
 			evutil_closesocket(fd);
-			pxy_conn_ctx_free(ctx);
+			pxy_conn_ctx_free(ctx, 1);
 			return;
 		}
 		if (OPTS_DEBUG(ctx->opts)) {
@@ -2385,7 +2419,7 @@ pxy_fd_readcb(MAYBE_UNUSED evutil_socket_t fd, UNUSED short what, void *arg)
 				               "event, aborting "
 				               "connection\n");
 				evutil_closesocket(fd);
-				pxy_conn_ctx_free(ctx);
+				pxy_conn_ctx_free(ctx, 1);
 				return;
 			}
 			event_add(ctx->ev, &retry_delay);
@@ -2453,7 +2487,7 @@ pxy_conn_setup(evutil_socket_t fd,
 			log_err_printf("Connection not found in NAT "
 			               "state table, aborting connection\n");
 			evutil_closesocket(fd);
-			pxy_conn_ctx_free(ctx);
+			pxy_conn_ctx_free(ctx, 1);
 			return;
 		}
 	} else if (spec->connect_addrlen > 0) {
@@ -2467,7 +2501,7 @@ pxy_conn_setup(evutil_socket_t fd,
 			log_err_printf("SNI mode used for non-SSL connection; "
 			               "aborting connection\n");
 			evutil_closesocket(fd);
-			pxy_conn_ctx_free(ctx);
+			pxy_conn_ctx_free(ctx, 1);
 			return;
 		}
 	}
@@ -2503,7 +2537,7 @@ pxy_conn_setup(evutil_socket_t fd,
 memout:
 	log_err_printf("Aborting connection setup (out of memory)!\n");
 	evutil_closesocket(fd);
-	pxy_conn_ctx_free(ctx);
+	pxy_conn_ctx_free(ctx, 1);
 	return;
 }
 
